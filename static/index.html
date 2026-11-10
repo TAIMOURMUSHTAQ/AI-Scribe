@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinguaLink360 Scribe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Noto+Nastaliq+Urdu:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true">LL</span><span>LinguaLink360 <b>Scribe</b></span></div>
+  <div class="topbar-right">
+    <span id="engine" class="engine" title="AI engine">Checking AI engine…</span>
+    <button id="newSession" class="btn ghost">New session</button>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Workspace views">
+  <button data-view="input" class="on">Notes</button>
+  <button data-view="analysis">Analysis</button>
+  <button data-view="note">SOAP note</button>
+</nav>
+
+<main class="workspace" id="workspace" data-view="input">
+  <!-- ============ INPUT ============ -->
+  <section class="col col-input" aria-label="Session input">
+    <details class="context" id="contextBox">
+      <summary><span>Patient context</span><span id="contextHint" class="hint">Optional. Improves goal and trend analysis</span></summary>
+      <div class="grid2">
+        <label>Discipline
+          <select id="discipline">
+            <option value="Speech-language therapy">Speech-language therapy</option>
+            <option value="Audiology">Audiology</option>
+            <option value="Occupational therapy">Occupational therapy</option>
+            <option value="Child psychology">Child psychology</option>
+            <option value="Other">Other</option>
+          </select>
+        </label>
+        <label>Age<input id="patientAge" maxlength="40" placeholder="e.g. 5 y 4 m"></label>
+      </div>
+      <label>Diagnosis on file<input id="diagnosis" maxlength="400" placeholder="As recorded by the clinic, e.g. speech sound disorder"></label>
+      <label>Treatment goals<textarea id="goals" rows="3" maxlength="4000" placeholder="One per line, e.g. /s/ initial at phrase level, 80% accuracy across 3 sessions"></textarea></label>
+      <label>Previous session note<textarea id="previousNote" rows="3" maxlength="8000" placeholder="Paste last session's note to compare progress"></textarea></label>
+      <div class="grid3 local-only">
+        <label>Patient ID<input id="patientId" maxlength="60" placeholder="MRN"></label>
+        <label>Session date<input id="sessionDate" type="date"></label>
+        <label>Clinician<input id="clinician" maxlength="120" placeholder="Your name"></label>
+      </div>
+      <p class="fine">Patient ID, date and clinician name stay in this browser and go on the PDF only. They are never sent to the AI.</p>
+    </details>
+
+    <div class="composer">
+      <div class="composer-head">
+        <label for="notes" class="h">Session notes</label>
+        <div class="composer-tools">
+          <select id="sampleSelect" aria-label="Load a sample session">
+            <option value="">Try a sample…</option>
+            <option value="artic">Articulation, English</option>
+            <option value="lang">Language delay, Roman Urdu mix</option>
+            <option value="aphasia">Adult aphasia, swallow flag</option>
+          </select>
+        </div>
+      </div>
+      <textarea id="notes" spellcheck="true" placeholder="Type, paste or dictate your raw notes. Shorthand and Urdu are fine.
+
+e.g. /s/ init words 14/20 w/ min verbal cues, phrase lvl 6/10 mod cues. Ammi ne bataya ghar pe roz practice ki. Plan: cont. phrase lvl, HEP list."></textarea>
+      <div class="composer-foot"><span id="charCount">0 characters</span><span id="staleNote" class="stale" hidden>Notes changed since this draft</span></div>
+
+      <div class="recorder" id="recorder" data-state="idle">
+        <button id="recBtn" class="rec-btn" aria-label="Start dictation"><span class="rec-dot"></span><span id="recLabel">Dictate</span></button>
+        <button id="pauseBtn" class="btn ghost sm" hidden>Pause</button>
+        <canvas id="wave" width="240" height="36" aria-hidden="true"></canvas>
+        <span id="recTime" class="rec-time">0:00</span>
+        <label class="btn ghost sm upload">Upload audio<input id="audioFile" type="file" accept="audio/*" hidden></label>
+      </div>
+      <div id="segments" class="segments" aria-live="polite"></div>
+      <p id="inputMsg" class="msg" role="status"></p>
+    </div>
+
+    <div class="generate-bar">
+      <button id="generateBtn" class="btn primary big">Analyse and draft note</button>
+      <button id="cancelBtn" class="btn ghost" hidden>Stop</button>
+      <span class="kbd">Ctrl + Enter</span>
+    </div>
+  </section>
+
+  <!-- ============ ANALYSIS ============ -->
+  <section class="col col-analysis" aria-label="Clinical analysis">
+    <div class="col-head">
+      <h2>Clinical analysis</h2>
+      <ol class="pipeline" id="pipeline">
+        <li data-stage="facts">Numbers checked</li>
+        <li data-stage="analysis">Clinical analysis</li>
+        <li data-stage="soap">SOAP note</li>
+        <li data-stage="checks">Safety checks</li>
+      </ol>
+    </div>
+    <div id="analysis" class="analysis">
+      <div class="empty">
+        <p>The analysis appears here first: what was reported, observed and measured, progress against goals, and the reasoning the note is built on.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ NOTE ============ -->
+  <section class="col col-note" aria-label="SOAP note">
+    <div class="col-head">
+      <h2>SOAP note</h2>
+      <span id="noteState" class="note-state">No draft yet</span>
+    </div>
+    <div id="checks" class="checks" hidden></div>
+    <div id="soap" class="soap">
+      <div class="empty"><p>Every statement in the note links to the findings it came from. Edit anything; nothing is final until you sign.</p></div>
+    </div>
+    <div id="extras" class="extras"></div>
+    <div class="note-actions" id="noteActions" hidden>
+      <div class="sign-row">
+        <button id="signBtn" class="btn primary">Sign note</button>
+        <span id="signInfo" class="fine"></span>
+      </div>
+      <div class="export-row">
+        <button id="copyBtn" class="btn ghost sm">Copy</button>
+        <button id="txtBtn" class="btn ghost sm">Download TXT</button>
+        <button id="pdfBtn" class="btn ghost sm">Download PDF</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
