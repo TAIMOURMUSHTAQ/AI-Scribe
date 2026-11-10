@@ -48,6 +48,9 @@ class Settings:
     max_context_chars: int = _int("MAX_CONTEXT_CHARS", 12000)
 
     service_token: str = os.getenv("SERVICE_TOKEN", "").strip()  # optional, for Laravel-to-service calls
+    # Optional browser password for a hosted demo/staging site (both must be set to turn it on).
+    basic_auth_user: str = os.getenv("BASIC_AUTH_USER", "").strip()
+    basic_auth_password: str = os.getenv("BASIC_AUTH_PASSWORD", "").strip()
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
     @property

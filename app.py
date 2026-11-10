@@ -5,8 +5,10 @@ Run:  uvicorn app:app --host 127.0.0.1 --port 8501
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import secrets
 import time
 from typing import Any, AsyncIterator
 
@@ -48,7 +50,7 @@ async def require_token(request: Request) -> None:
     if not settings.service_token:
         return
     supplied = request.headers.get("x-service-token") or request.headers.get("authorization", "").removeprefix("Bearer ")
-    if supplied != settings.service_token:
+    if not secrets.compare_digest(supplied.encode(), settings.service_token.encode()):
         raise HTTPException(status_code=401, detail="Invalid or missing service token.")
 
 
@@ -75,7 +77,32 @@ class SecurityHeaders:
         await self.inner(scope, receive, send_with_headers)
 
 
+class BasicAuth:
+    """Optional HTTP Basic auth for a hosted staging site (BASIC_AUTH_USER + BASIC_AUTH_PASSWORD).
+
+    /health stays open so the hosting platform's health check works. Plain ASGI so streaming is unaffected.
+    """
+
+    OPEN_PATHS = {"/health"}
+
+    def __init__(self, inner, user: str, password: str):
+        self.inner = inner
+        self.expected = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode() if user and password else ""
+
+    async def __call__(self, scope, receive, send):
+        if not self.expected or scope["type"] != "http" or scope["path"] in self.OPEN_PATHS:
+            return await self.inner(scope, receive, send)
+        supplied = next((v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"authorization"), "")
+        if secrets.compare_digest(supplied.encode(), self.expected.encode()):
+            return await self.inner(scope, receive, send)
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"www-authenticate", b'Basic realm="LinguaLink360 Scribe", charset="UTF-8"'),
+                                (b"content-type", b"text/plain; charset=utf-8"), (b"cache-control", b"no-store")]})
+        await send({"type": "http.response.body", "body": b"Sign-in required."})
+
+
 app.add_middleware(SecurityHeaders)
+app.add_middleware(BasicAuth, user=settings.basic_auth_user, password=settings.basic_auth_password)
 
 
 @app.exception_handler(ProviderError)

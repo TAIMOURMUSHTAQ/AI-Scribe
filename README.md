@@ -46,6 +46,19 @@ wording, which is rule-based, and nothing leaves the machine.
 Tests (no key, no network): `python -m pytest -q` (27 tests, including the real OpenAI code path
 run against a simulated OpenAI server).
 
+## Deploy to Render (staging)
+
+[render.yaml](render.yaml) is a Render Blueprint (Python web service, Singapore region, health check on `/health`).
+
+1. Push this folder to a GitHub repo (`.env` is git-ignored and must stay out of git).
+2. In Render: **New > Blueprint**, pick the repo, and fill in the secret values it asks for:
+   - `OPENAI_API_KEY`: a separate staging key with a monthly spending cap
+   - `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`: the sign-in the browser will ask for. A Render URL is public,
+     so without these anyone who finds it can use your OpenAI credit.
+3. Open `https://<service>.onrender.com`. HTTPS is automatic, so dictation works.
+
+Staging is for made-up data only. See [SYSTEM_REVIEW.md](SYSTEM_REVIEW.md) for what is still needed before real use.
+
 ## Using it
 
 1. **Patient context** (optional): discipline, age, diagnosis on file, goals, previous session note.
@@ -115,3 +128,8 @@ This is a standalone prototype. Before any real patient use it still needs: Lara
 clinic isolation, recorded consent, an approved AI data policy, audit records for each AI run, and
 clinical-lead review of the prompt and of an evaluation set. Use **made-up data only** until then. The AI
 drafts; the clinician decides and signs.
+
+## To run the app everytime
+cd C:\Projects\lingualink360_ai_scribe_v4
+.\.venv\Scripts\Activate.ps1
+uvicorn app:app --host 127.0.0.1 --port 8501

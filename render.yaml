@@ -1,0 +1,65 @@
+# Render Blueprint for LinguaLink360 AI Scribe v4.
+# Deploy: push this folder to GitHub, then in Render choose New > Blueprint and pick the repo.
+# Render asks for every value marked "sync: false" during the first deploy (they are never stored in git).
+#
+# STAGING ONLY: made-up data only. See SYSTEM_REVIEW.md before any real patient use.
+services:
+  - type: web
+    name: lingualink360-scribe
+    runtime: python
+    region: singapore          # closest Render region to Pakistan
+    plan: starter              # "free" also works, but it sleeps after 15 min idle (first request then takes ~1 min)
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    # --proxy-headers: Render terminates HTTPS in front of the app.
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+
+      # ---- AI engine ----
+      - key: AI_PROVIDER
+        value: openai           # set to "mock" for a demo with no key and no data sent to OpenAI
+      - key: OPENAI_API_KEY
+        sync: false             # use a separate staging key with a monthly spending cap
+      - key: OPENAI_CLINICAL_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_REASONING_EFFORT
+        value: ""
+      - key: OPENAI_TRANSCRIPTION_MODEL
+        value: gpt-transcribe
+
+      # ---- Access control ----
+      # Browser sign-in for the whole site (except /health). Leave both empty to turn it off.
+      - key: BASIC_AUTH_USER
+        sync: false
+      - key: BASIC_AUTH_PASSWORD
+        sync: false
+      # Only for Laravel server-to-server calls. Setting it blocks the built-in web page's API calls.
+      - key: SERVICE_TOKEN
+        value: ""
+
+      # ---- Time limits (seconds) ----
+      - key: AI_CONNECT_TIMEOUT
+        value: "10"
+      - key: AI_STREAM_IDLE_TIMEOUT
+        value: "40"
+      - key: AI_PIPELINE_TIMEOUT
+        value: "150"
+      - key: AI_TRANSCRIBE_TIMEOUT
+        value: "60"
+      - key: AI_MAX_RETRIES
+        value: "1"
+      - key: AI_MAX_CONCURRENT
+        value: "8"
+
+      # ---- Limits ----
+      - key: MAX_AUDIO_SIZE_MB
+        value: "25"
+      - key: MAX_INPUT_CHARS
+        value: "30000"
+
+      - key: LOG_LEVEL
+        value: INFO
