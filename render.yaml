@@ -25,9 +25,9 @@ services:
       - key: OPENAI_API_KEY
         sync: false             # use a separate staging key with a monthly spending cap
       - key: OPENAI_CLINICAL_MODEL
-        value: gpt-4.1-mini
+        value: gpt-5.4-mini
       - key: OPENAI_REASONING_EFFORT
-        value: ""
+        value: low
       - key: OPENAI_TRANSCRIPTION_MODEL
         value: gpt-transcribe
 
@@ -45,9 +45,9 @@ services:
       - key: AI_CONNECT_TIMEOUT
         value: "10"
       - key: AI_STREAM_IDLE_TIMEOUT
-        value: "40"
+        value: "90"
       - key: AI_PIPELINE_TIMEOUT
-        value: "150"
+        value: "180"
       - key: AI_TRANSCRIBE_TIMEOUT
         value: "60"
       - key: AI_MAX_RETRIES

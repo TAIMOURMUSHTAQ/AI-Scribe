@@ -90,7 +90,7 @@ Each of these was reproduced by running the code on sample input.
 7. **Turning on `SERVICE_TOKEN` breaks the built-in page.** The page never sends the token, so every call returns 401. That's fine if only Laravel calls the service, but the README should say so. Also, the token comparison in [app.py](app.py) should use `secrets.compare_digest` so its timing doesn't reveal anything about the token.
 8. **The PDF can't show Urdu.** [scribe/pdf.py](scribe/pdf.py) uses the standard Helvetica font, so a patient name or edited line in Urdu script prints as empty boxes. Registering a Noto Naskh Arabic or Noto Nastaliq Urdu font fixes this.
 9. **No way to measure quality.** The 27 tests cover the plumbing, not the clinical output. There is no set of example cases to compare models (`gpt-4.1-mini` vs `gpt-5.4-mini`) or prompt changes against. 10–20 made-up cases with expected findings, goal statuses and red flags, plus a script that scores the output, would close this.
-10. **Rewriting one section can drift.** The rewrite call sees the findings and the current note, but not the goal-progress analysis or the trend. A rewritten Assessment can end up disagreeing with the goal statuses shown in the analysis.
+10. ~~**Rewriting one section can drift.**~~ Fixed in scribe_v4.1: the rewrite now also receives goal progress, trend, gaps and risk flags. The rewrite call sees the findings and the current note, but not the goal-progress analysis or the trend. A rewritten Assessment can end up disagreeing with the goal statuses shown in the analysis.
 
 ### Housekeeping
 
@@ -111,6 +111,24 @@ Each of these was reproduced by running the code on sample input.
 
 Laravel authentication and clinic isolation, recorded consent, an approved AI data policy, an audit record for each AI run,
 and clinical-lead review of the prompt and of an evaluation set. Use made-up data only until then.
+
+## Update: scribe_v4.1 (therapist feedback, 11 November 2026)
+
+Therapists reported that the scribe did not show what was missing from their entries, did not propose a
+useful plan, and did not point out what they may have missed in the assessment. Changes:
+
+- **"What may be missing" panel.** A code checklist ([scribe/completeness.py](scribe/completeness.py)) flags
+  every reported or observed difficulty that does not say how severe, how often and since when, plus missing
+  cue level, trial counts, task level, goal data, session length, caregiver report, home practice and plan.
+  The AI adds assessment gaps (e.g. stimulability, error consistency, carry-over) and caregiver questions.
+  AI gaps that repeat a checklist item are removed in code.
+- **The clinician acts on each gap:** answer it (added to the notes as a `Clarification (…)` line), plan it
+  for next session, or dismiss it (stays dismissed on re-draft). **Update note** re-drafts with the answers.
+- **Plan proposals.** The Plan keeps the clinician's own items and adds 2–5 AI proposals with reasons.
+  Each needs Accept or Reject; signing is blocked until every proposal is decided. Accepted proposals are
+  marked † in the TXT and PDF. Proposals never include a diagnosis, medication, discharge or specific referral.
+- **Model:** `gpt-5.4-mini` with low reasoning effort; time limits raised to 90 s idle / 180 s total.
+- Also fixed: "7/10 min cues" was read as a 10-minute session.
 
 ## Suggested order
 

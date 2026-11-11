@@ -42,7 +42,7 @@ _OUT_OF = re.compile(r"\b(\d{1,3})\s*(?:out\s+of|of|outta)\s*(\d{1,3})\b", re.I)
 # Roman Urdu: "20 mein se 14" = 14 out of 20
 _URDU_OUT_OF = re.compile(r"\b(\d{1,3})\s*(?:mein|main|mai|men|me)\s+(?:se|sy|say)\s+(\d{1,3})\b", re.I)
 _PERCENT = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b|fisad\b|feesad\b)", re.I)
-_DURATION = re.compile(r"\b(\d{1,3})\s*(?:min(?:ute)?s?|mins?)\b", re.I)
+_DURATION = re.compile(r"(?<![/\d])\b(\d{1,3})\s*(?:min(?:ute)?s?|mins?)\b", re.I)
 _NUMBER = re.compile(r"(?<![\w/])(\d+(?:\.\d+)?)(?![\w])")
 
 _CUE = re.compile(
@@ -157,7 +157,10 @@ RED_FLAGS: list[tuple[str, str, str, re.Pattern]] = [
                 r"beaten|unsafe\s+at\s+home)", re.I)),
     ("self_harm", "high", "Self-injury or self-harm mentioned: assess risk per clinic protocol.",
      re.compile(r"\b(self[-\s]?harm\w*|self[-\s]?injur\w*|hurt(?:s|ing)?\s+(?:him|her|them)sel(?:f|ves)|"
-                r"head[-\s]?bang\w*|suicid\w*|bit(?:es|ing)?\s+(?:his|her|their)\s+(?:own\s+)?(?:hand|arm)s?)",
+                r"head[-\s]?bang\w*|suicid\w*|bit(?:es|ing)?\s+(?:his|her|their)\s+(?:own\s+)?(?:hand|arm)s?|"
+                r"(?:hit|hits|hitting|bang|bangs|banging|slap|slaps|slapping|punch\w*|scratch\w*)\s+(?:him|her|them)sel(?:f|ves)|"
+                r"(?:hit|hits|hitting|bang|bangs|banging|slap|slaps|slapping|punch\w*)\s+(?:his|her|their)\s+(?:own\s+)?(?:head|face)|"
+                r"(?:apna|apne)\s+(?:sir|mun[h]?)\s+\w*\s*(?:maar|pat)\w*|sir\s+(?:deewar|zameen)\s+\w*\s*(?:maar|pat)\w*)",
                 re.I)),
     ("pain_or_discomfort", "medium", "Pain or discomfort reported: note location and whether it limited participation.",
      re.compile(r"\b(pain(?:ful)?|hurts?|ache|dard)\b", re.I)),
@@ -198,13 +201,41 @@ def detect_injection(text: str) -> list[str]:
     return [_snippet(text, m.start(), m.end(), 25) for m in _INJECTION.finditer(text)]
 
 
-def numbers_in(text: str) -> set[str]:
+_UNITS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+          "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_EN_WORD_NUM = {w: i for i, w in enumerate(_UNITS)} | _TENS | {"hundred": 100, "half": 0.5}
+# Roman Urdu numbers, only used to widen what the clinician wrote (never to read the English note).
+_UR_WORD_NUM = {"ek": 1, "teen": 3, "chaar": 4, "char": 4, "paanch": 5, "panch": 5, "chay": 6, "chhe": 6, "saat": 7,
+                "aath": 8, "nau": 9, "das": 10, "gyarah": 11, "barah": 12, "pandrah": 15, "bees": 20, "tees": 30,
+                "chalees": 40, "pachaas": 50, "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90, "sau": 100}
+_WORD_NUM_RE = re.compile(r"\b(" + "|".join(sorted(_TENS, key=len, reverse=True)) + r")[-\s]+(" +
+                          "|".join(_UNITS[1:10]) + r")\b|\b([a-z]+)\b", re.I)
+
+
+def _word_numbers(text: str, urdu: bool) -> set[str]:
+    out: set[str] = set()
+    for m in _WORD_NUM_RE.finditer(text or ""):
+        if m.group(1):
+            out.add(str(_TENS[m.group(1).lower()] + _UNITS.index(m.group(2).lower())))
+            continue
+        w = m.group(3).lower()
+        v = _EN_WORD_NUM.get(w, _UR_WORD_NUM.get(w) if urdu else None)
+        if v is not None and w not in ("one", "half"):  # "one of the", "half the time" are not data
+            out.add(_fmt_pct(float(v)))
+    return out
+
+
+def numbers_in(text: str, words: bool = False, urdu: bool = False) -> set[str]:
+    """Numbers written as digits, and with words=True also as words ("four-year-old" -> 4)."""
     out: set[str] = set()
     for m in _NUMBER.finditer(text or ""):
         n = m.group(1)
         out.add(n)
         if "." in n:
             out.add(n.rstrip("0").rstrip("."))
+    if words:
+        out |= _word_numbers(text, urdu)
     return out
 
 
@@ -239,7 +270,7 @@ def facts_for_prompt(facts: dict[str, Any]) -> str:
         lines.append("- Durations mentioned (minutes): " + ", ".join(map(str, facts["durations_min"])))
     if facts["red_flags"]:
         lines.append("- Pattern-detected possible red flags (confirm against the text; do not exaggerate): " +
-                     "; ".join(f'{f["category"]}: "{f["match"]}"' for f in facts["red_flags"]))
+                     "; ".join(f'{f["category"]} ({f["severity"]}): "{f["match"]}"' for f in facts["red_flags"]))
     return "\n".join(lines) or "- No numeric measurements were detected by code."
 
 
@@ -250,7 +281,8 @@ def facts_for_prompt(facts: dict[str, Any]) -> str:
 CLINICAL_TERMS = [
     # diagnoses / labels
     "apraxia", "dyspraxia", "dysarthria", "aphasia", "autism", "asd", "adhd", "dyslexia", "dysphagia",
-    "stuttering", "stammering", "cluttering", "cerebral palsy", "down syndrome", "developmental delay",
+    "stuttering", "stammering", "fluency disorder", "developmental stammering", "developmental stuttering",
+    "persistent stammering", "persistent stuttering", "cluttering", "cerebral palsy", "down syndrome", "developmental delay",
     "language disorder", "speech sound disorder", "phonological disorder", "articulation disorder",
     "intellectual disability", "hearing loss", "auditory processing disorder", "selective mutism",
     "voice disorder", "vocal nodules", "global developmental delay", "learning disability",
@@ -261,6 +293,15 @@ CLINICAL_TERMS = [
 ]
 
 NOT_DOCUMENTED = "not documented"
+
+# The same condition in other words: the AI may use any of them if the clinician used one.
+TERM_SYNONYMS = {
+    "stuttering": r"stutter\w*|stammer\w*|haklah\w*|hakla\w*|disfluen\w*|dysfluen\w*",
+    "stammering": r"stutter\w*|stammer\w*|haklah\w*|hakla\w*|disfluen\w*|dysfluen\w*",
+    "dysphagia": r"dysphagia|swallowing\s+(?:disorder|difficult\w*)",
+    "asd": r"\basd\b|autism",
+    "autism": r"\basd\b|autism",
+}
 
 
 def verify_quote(quote: str, source_norm: str, source_tokens: set[str]) -> str:
@@ -315,8 +356,12 @@ def check_draft(draft: dict[str, Any], session_input: str, context_text: str,
                            "type": "evidence_not_found",
                            "message": f"Finding {fid}: its evidence quote could not be found in your input. Check it before relying on it."})
 
+    # Plan items and gap actions may cite gap ids (AI G#, checklist C#) as well as findings.
+    known_ids = finding_ids | {str(g.get("id")) for g in analysis.get("gaps") or [] if isinstance(g, dict)}
+    known_ids |= {str(g.get("id")) for g in facts.get("checklist_gaps") or []}
+
     # 2. Numbers in the note must come from the input, the context or code-computed percentages.
-    allowed = numbers_in(source)
+    allowed = numbers_in(source, words=True, urdu=True)
     for m in facts.get("measurements", []) + facts.get("context_measurements", []):
         pct = m["percent"]
         allowed |= {_fmt_pct(pct), str(round(pct)), f"{pct:.1f}", str(m["correct"]), str(m["total"])}
@@ -326,32 +371,38 @@ def check_draft(draft: dict[str, Any], session_input: str, context_text: str,
     for section, i, item in _iter_soap(soap):
         text = str(item.get("text", ""))
         low = text.lower()
-        bad = sorted({n for n in numbers_in(text) if n not in allowed})
+        proposed = section == "plan" and item.get("origin") == "ai_proposed"
+        if proposed and item.get("decision") != "accepted":
+            issues.append({"severity": "medium", "section": "plan", "ref": f"plan:{i}", "type": "plan_pending",
+                           "message": "AI-proposed plan item waiting for your decision: accept or reject it."})
+        bad = sorted({n for n in numbers_in(text, words=True) if n not in allowed}, key=float)
         if bad:
             issues.append({"severity": "high", "section": section, "ref": f"{section}:{i}", "type": "unsupported_number",
                            "message": f"Number(s) {', '.join(bad)} do not appear in your input or verified facts."})
-        for term in CLINICAL_TERMS:
-            if re.search(rf"\b{re.escape(term)}\b", low) and not re.search(rf"\b{re.escape(term)}\b", lowered_source):
+        for term in CLINICAL_TERMS if not proposed else ():  # proposals are labelled and need the clinician's decision
+            in_source = re.search(rf"\b(?:{TERM_SYNONYMS.get(term, re.escape(term))})\b", lowered_source)
+            if re.search(rf"\b{re.escape(term)}\b", low) and not in_source:
                 if term.startswith("diagnos") and re.search(r"\bdiagnos\w*\s+(?:on\s+file|per\s+record)", low):
                     continue
                 issues.append({"severity": "high", "section": section, "ref": f"{section}:{i}", "type": "unsupported_term",
                                "message": f'"{term}" is not in your input or the patient context. AI must not add diagnoses, medication or referral decisions.'})
         basis = [str(b) for b in (item.get("basis") or [])]
-        unknown = [b for b in basis if b not in finding_ids]
+        unknown = [b for b in basis if b not in known_ids]
         if unknown and findings:
             issues.append({"severity": "low", "section": section, "ref": f"{section}:{i}", "type": "unknown_basis",
                            "message": f"Cites unknown finding(s) {', '.join(unknown)}."})
         if not basis and NOT_DOCUMENTED not in low and not item.get("edited"):
             issues.append({"severity": "low", "section": section, "ref": f"{section}:{i}", "type": "no_basis",
                            "message": "This statement has no linked clinical basis."})
-        if section == "plan" and basis and findings and NOT_DOCUMENTED not in low:
+        if section == "plan" and not proposed and basis and findings and NOT_DOCUMENTED not in low:
             sources = {str(f.get("source")) for f in findings if str(f.get("id")) in basis}
             if sources and "clinician_plan" not in sources:
                 issues.append({"severity": "medium", "section": "plan", "ref": f"plan:{i}", "type": "plan_not_stated",
                                "message": "This plan item is not something you stated as a plan. Accept it only if you agree."})
 
     # 3. High-severity red flags spotted by code should be reflected somewhere in the note.
-    note_text = " ".join(str(item.get("text", "")) for _, _, item in _iter_soap(soap)).lower()
+    note_text = " ".join(str(item.get("text", "")) for _, _, item in _iter_soap(soap)
+                         if not (item.get("origin") == "ai_proposed" and item.get("decision") != "accepted")).lower()
     for flag in facts.get("red_flags", []):
         if flag["severity"] == "high" and flag["match"].lower().split()[0][:4] not in note_text:
             issues.append({"severity": "high", "section": "general", "ref": flag["category"], "type": "red_flag_missing",

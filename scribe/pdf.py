@@ -44,12 +44,19 @@ def build_pdf(req: ExportRequest) -> bytes:
                                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
         story += [t, Spacer(1, 4)]
 
+    any_proposed = False
     for key, letter, label in LABELS:
-        items = req.soap.get(key) or []
+        items = [s for s in req.soap.get(key) or [] if s.text.strip() and not s.pending]
         parts = [Paragraph(f"{letter} · {label}", head)]
-        texts = [s.text.strip() for s in items if s.text.strip()] or ["Not documented."]
-        parts += [Paragraph(escape(x).replace("\n", "<br/>"), body) for x in texts]
+        texts = []
+        for s in items:
+            mark = " †" if s.origin == "ai_proposed" else ""
+            any_proposed |= bool(mark)
+            texts.append(escape(s.text.strip()).replace("\n", "<br/>") + mark)
+        parts += [Paragraph(x, body) for x in texts or ["Not documented."]]
         story.append(KeepTogether(parts))
+    if any_proposed:
+        story.append(Paragraph("† Proposed by the AI assistant and accepted by the treating clinician.", small))
 
     if req.summary.strip():
         story += [Paragraph("Clinical analysis summary", head), Paragraph(escape(req.summary.strip()), small)]

@@ -19,6 +19,22 @@ _STR_LIST = {"type": "array", "items": _STR}
 
 STATEMENT = _obj({"text": _STR, "basis": _STR_LIST})
 STATEMENTS = {"type": "array", "items": STATEMENT}
+# Plan items say who they came from: the clinician's own words, or an AI proposal awaiting a decision.
+PLAN_ACTIONS = ["assess", "treat", "caregiver", "safety", "document", "other"]
+PLAN_STATEMENT = _obj({"text": _STR, "basis": _STR_LIST,
+                       "origin": {"type": "string", "enum": ["clinician", "ai_proposed"]},
+                       "action": {"type": "string", "enum": PLAN_ACTIONS},
+                       "rationale": _STR})
+PLAN_STATEMENTS = {"type": "array", "items": PLAN_STATEMENT}
+GAP = _obj({
+    "id": _STR,
+    "kind": {"type": "string", "enum": ["documentation", "assessment", "question"]},
+    "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+    "item": _STR,
+    "why": _STR,
+    "ask": _STR,
+    "basis": _STR_LIST,
+})
 
 DRAFT_SCHEMA: dict[str, Any] = _obj({
     "input_language": {"type": "string", "enum": ["english", "urdu", "roman_urdu", "mixed", "other"]},
@@ -35,7 +51,8 @@ DRAFT_SCHEMA: dict[str, Any] = _obj({
         })},
         "goal_progress": {"type": "array", "items": _obj({
             "goal": _STR,
-            "status": {"type": "string", "enum": ["met", "progressing", "maintained", "regressed", "not_addressed", "unclear"]},
+            "status": {"type": "string", "enum": ["met", "progressing", "maintained", "regressed", "baseline",
+                                                   "not_addressed", "unclear"]},
             "basis": _STR_LIST,
             "note": _STR,
         })},
@@ -50,15 +67,15 @@ DRAFT_SCHEMA: dict[str, Any] = _obj({
             "evidence": _STR,
             "recommended_action": _STR,
         })},
-        "missing_information": _STR_LIST,
+        "gaps": {"type": "array", "items": GAP},
         "contradictions": _STR_LIST,
     }),
-    "soap": _obj({s: STATEMENTS for s in SECTIONS}),
-    "suggestions": {"type": "array", "items": _obj({"suggestion": _STR, "rationale": _STR, "basis": _STR_LIST})},
-    "follow_up_questions": _STR_LIST,
+    "soap": _obj({"subjective": STATEMENTS, "objective": STATEMENTS, "assessment": STATEMENTS,
+                  "plan": PLAN_STATEMENTS}),
 })
 
 REGENERATE_SCHEMA: dict[str, Any] = _obj({"statements": STATEMENTS})
+REGENERATE_PLAN_SCHEMA: dict[str, Any] = _obj({"statements": PLAN_STATEMENTS})
 
 
 class PatientContext(BaseModel):
@@ -75,6 +92,13 @@ class PatientContext(BaseModel):
 class DraftRequest(BaseModel):
     input: str = Field(min_length=1, max_length=settings.max_input_chars)
     context: PatientContext = Field(default_factory=PatientContext)
+    # Gaps the clinician marked "not relevant": checklist keys or the AI gap's wording. Not raised again.
+    dismissed_gaps: list[str] = Field(default_factory=list, max_length=60)
+
+    @field_validator("dismissed_gaps")
+    @classmethod
+    def trim_dismissed(cls, v: list[str]) -> list[str]:
+        return [x.strip()[:300] for x in v if x and x.strip()]
 
     @field_validator("input")
     @classmethod
@@ -88,6 +112,15 @@ class Statement(BaseModel):
     text: str = Field(default="", max_length=3000)
     basis: list[str] = Field(default_factory=list)
     edited: bool = False
+    # Plan only. An AI-proposed item counts as part of the note only once decision == "accepted".
+    origin: Literal["clinician", "ai_proposed"] = "clinician"
+    rationale: str = Field(default="", max_length=1000)
+    action: str = Field(default="", max_length=20)
+    decision: Literal["", "pending", "accepted"] = ""
+
+    @property
+    def pending(self) -> bool:
+        return self.origin == "ai_proposed" and self.decision != "accepted"
 
 
 class CheckRequest(DraftRequest):

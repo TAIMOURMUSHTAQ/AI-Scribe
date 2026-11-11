@@ -43,7 +43,7 @@ Open http://127.0.0.1:8501. The microphone needs `localhost` or HTTPS, in Chrome
 **No key yet or showing it to someone?** Set `AI_PROVIDER=mock`. Everything works except the clinical
 wording, which is rule-based, and nothing leaves the machine.
 
-Tests (no key, no network): `python -m pytest -q` (27 tests, including the real OpenAI code path
+Tests (no key, no network): `python -m pytest -q` (49 tests, including the real OpenAI code path
 run against a simulated OpenAI server).
 
 ## Deploy to Render (staging)
@@ -69,17 +69,25 @@ Staging is for made-up data only. See [SYSTEM_REVIEW.md](SYSTEM_REVIEW.md) for w
 3. **Analyse and draft note** (Ctrl + Enter). The middle column fills first:
    - numbers checked by code
    - red flags
+   - **What may be missing**: gaps in the record (including how severe, how often and since when for
+     every reported difficulty), areas not assessed or not documented, and questions for the patient or
+     caregiver. Fixed checklist items are tagged "Checklist"; the rest come from the AI. For each one:
+     **Add answer** (goes into your notes as a `Clarification (…)` line), **Plan for next session**, or
+     **Not relevant** (stays dismissed when you draft again). After answering, press **Update note**.
    - progress against each goal, and the trend since the previous note
    - findings F1, F2 … colour-coded as reported, observed, measured, your plan or context, each with
      the exact quote from your notes and whether code found that quote
-   - clinical reasoning, and what is missing or contradictory
+   - clinical reasoning, and contradictions
 4. **SOAP note** (right): every line has chips (F1, F3…). Click one to jump to the finding; click
    "Show in notes" to highlight the source text. Edit any line directly, add or remove lines, or
    **Rewrite** one section with an optional instruction (e.g. "shorter", "parent-friendly").
+   The Plan holds your own next steps plus **AI proposals**, each with its reason. **Accept** or
+   **Reject** each proposal; only accepted ones go into the note, marked † in the TXT and PDF.
 5. **Checks** banner: invented numbers, diagnoses, medication or referrals you did not write, plan items
    you did not state, red flags missing from the note, and instruction-like text in the input. Click an
    item to jump to the line.
-6. **Sign note** (needs clinician name) → Copy, TXT or PDF. Signing locks the note; "Unlock to amend" reopens it.
+6. **Sign note** (needs clinician name, and a decision on every AI proposal) → Copy, TXT or PDF.
+   Signing locks the note; "Unlock to amend" reopens it.
 
 ## API
 
@@ -106,6 +114,7 @@ project rule that the browser talks only to Laravel: Laravel checks permissions 
 ```
 app.py                 routes, SSE streaming with heartbeat, token check
 scribe/facts.py        code-based facts + all safety checks
+scribe/completeness.py code checklist of documentation gaps ("how much / how often / since when")
 scribe/prompts.py      versioned prompts (scribe_v4.0)
 scribe/schema.py       strict JSON schema + request models
 scribe/providers.py    OpenAI (async, timeouts, error mapping) and Mock
@@ -113,13 +122,14 @@ scribe/pipeline.py     facts → streamed AI → checks
 scribe/partial_json.py renders half-finished JSON while streaming
 scribe/pdf.py          in-memory PDF
 static/                index.html, styles.css, app.js (no build step)
-tests/                 27 tests
+tests/                 49 tests
 ```
 
 ## Choosing a model
 
-- `gpt-4.1-mini`: fastest time to first words, and what v3 was tested with. Default.
-- `gpt-5.4-mini` + `OPENAI_REASONING_EFFORT=low`: stronger clinical reasoning, a few seconds slower to start.
+- `gpt-5.4-mini` + `OPENAI_REASONING_EFFORT=low`: default since scribe_v4.1. Better gaps and plan proposals;
+  a made-up sample drafted in about 10–13 s.
+- `gpt-4.1-mini` with `OPENAI_REASONING_EFFORT` empty: faster to first words, weaker clinical reasoning.
 - Before switching models for real use, run the same 5–10 made-up cases on both and compare edits needed.
 
 ## Not production-ready yet

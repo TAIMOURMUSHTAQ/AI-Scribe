@@ -20,7 +20,7 @@ from scribe import __version__
 from scribe.config import ENV_FILE, ROOT, settings
 from scribe.facts import check_draft
 from scribe.pdf import build_pdf
-from scribe.pipeline import regenerate_section, run_draft
+from scribe.pipeline import build_facts, regenerate_section, run_draft
 from scribe.prompts import PROMPT_VERSION
 from scribe.providers import Provider, ProviderError, make_provider
 from scribe.schema import CheckRequest, DraftRequest, ExportRequest, RegenerateRequest
@@ -234,7 +234,9 @@ async def regenerate(req: RegenerateRequest, provider: Provider = Depends(get_pr
 @app.post("/api/scribe/check", dependencies=[Depends(require_token)])
 async def check(req: CheckRequest):
     """Instant code-only re-check after the clinician edits the note. No AI call."""
-    return check_draft(req.draft(), req.input, req.context.as_text())
+    ctx_text = req.context.as_text()
+    facts = build_facts(req.input, req.context.model_dump(), ctx_text, req.dismissed_gaps)
+    return check_draft(req.draft(), req.input, ctx_text, facts)
 
 
 @app.post("/api/scribe/export", dependencies=[Depends(require_token)])

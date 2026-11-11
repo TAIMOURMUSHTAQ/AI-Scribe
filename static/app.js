@@ -7,7 +7,8 @@ const SECTIONS = [
   ["assessment", "A", "Assessment"], ["plan", "P", "Plan"],
 ];
 const SRC_LABEL = { reported: "Reported", observed: "Observed", measured: "Measured", clinician_plan: "Your plan", context: "Context" };
-const STATUS_LABEL = { met: "Met", progressing: "Progressing", maintained: "Maintained", regressed: "Regressed",
+const ACTION_LABEL = { assess: "Assess", treat: "Treatment option", caregiver: "Caregiver", safety: "Safety", document: "Documentation" };
+const STATUS_LABEL = { baseline: "Baseline", met: "Met", progressing: "Progressing", maintained: "Maintained", regressed: "Regressed",
   not_addressed: "Not addressed", unclear: "Unclear", improved: "Improved", declined: "Declined", mixed: "Mixed",
   not_comparable: "No previous note" };
 const URDU_RE = /[؀-ۿ]/;
@@ -15,7 +16,12 @@ const URDU_RE = /[؀-ۿ]/;
 const S = {
   status: null, draft: null, facts: null, checks: null, timings: null, model: "",
   runInput: "", runContext: null, generating: false, abort: null, signed: null, confirmSign: false,
+  gapState: {},      // gap id -> { status: "answered" | "dismissed" | "planned", answer }
+  dismissed: [],     // checklist keys / AI gap wording marked "not relevant"; kept across re-drafts
+  answersAdded: 0,   // answers added to the notes since the last draft
 };
+const GAP_KIND = { documentation: "Missing from the record", assessment: "Not assessed or not documented", question: "Questions for the patient or caregiver" };
+const isPending = (s) => s.origin === "ai_proposed" && s.decision !== "accepted";
 
 /* ------------------------------------------------------------------ utils */
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -96,6 +102,10 @@ const SAMPLES = {
       goals: "Use 2-word combinations (verb + noun) in play, 10 spontaneous per session\nFollow 2-step instructions with 80% accuracy",
       prev: "4 spontaneous 2-word combinations. 2-step instructions 5/10 with gestural cues." },
     notes: "Session 40 min, play based. Bachay ne aaj 7 spontaneous 2-word combos use kiye (e.g. 'gari chalao', 'ball do', 'more juice'). Mostly imitation ke baad, verb+noun abhi kam. 2-step instructions 7/10 sahi with gestural cues, without gesture 3 out of 5. Ammi ne bataya k ghar pe naye words bol raha hai, roughly 10 naye words is week. Nani ke ghar gaye the to kam bola, shy tha. Joint attention behtar, turn taking 4 turns tak. Plan: next session verb vocabulary pe focus, parent coaching on expansion, HEP: 'say what you see' during bath time.",
+  },
+  sparse: {
+    ctx: { discipline: "Speech-language therapy", age: "7 y", dx: "", goals: "Produce /r/ in initial position at word level with 80% accuracy", prev: "" },
+    notes: "Mother reports he finds it difficult to speak in class and avoids answering. Worked on /r/ words today, did ok, some improvement. Distorted /r/ in most words. Will continue /r/.",
   },
   aphasia: {
     ctx: { discipline: "Speech-language therapy", age: "62 y", dx: "Aphasia following left MCA stroke (March 2026)",
@@ -305,7 +315,8 @@ async function generate() {
   if (S.signed && !confirm("This note is signed. Drafting again will replace it. Continue?")) return;
 
   setMsg("");
-  S.generating = true; S.draft = null; S.checks = null; S.signed = null; S.confirmSign = false;
+  S.generating = true; S.draft = null; S.checks = null; S.signed = null; S.confirmSign = false; S.srcFilter = null;
+  S.gapState = {}; S.answersAdded = 0;
   S.runInput = input; S.runContext = context();
   $("generateBtn").disabled = true; $("generateBtn").textContent = "Analysing…"; $("cancelBtn").hidden = false;
   resetPipeline();
@@ -321,7 +332,7 @@ async function generate() {
   try {
     const r = await fetch("/api/scribe/draft", {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ input, context: S.runContext }), signal: ctrl.signal,
+      body: JSON.stringify({ input, context: S.runContext, dismissed_gaps: S.dismissed }), signal: ctrl.signal,
     });
     if (!r.ok) throw new Error(await errorText(r));
     const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
@@ -409,6 +420,9 @@ function renderAnalysis(a, streaming, lang) {
       `<div class="risk ${esc(r.severity)}"><b>${txt(r.flag)}</b>${r.evidence ? `<p>“${txt(r.evidence)}”</p>` : ""}${r.recommended_action ? `<p>Consider: ${txt(r.recommended_action)}</p>` : ""}</div>`).join("") + `</div></div>`);
   }
 
+  const gapsHtml = renderGaps(a.gaps || [], streaming);
+  if (gapsHtml) parts.push(gapsHtml);
+
   const goals = a.goal_progress || [];
   const trend = a.trend_vs_previous;
   if (goals.length || (trend && trend.direction && trend.direction !== "not_comparable")) {
@@ -421,11 +435,11 @@ function renderAnalysis(a, streaming, lang) {
   const findings = a.findings || [];
   if (findings.length) {
     parts.push(`<div class="block"><h3>Findings from your notes</h3>
-      <div class="legend"><span style="--c:var(--src-reported)">Reported</span><span style="--c:var(--src-observed)">Observed</span><span style="--c:var(--src-measured)">Measured</span><span style="--c:var(--src-plan)">Your plan</span><span style="--c:var(--src-context)">Context</span></div>
+      ${legend(findings, streaming)}
       <ul class="findings">` + findings.map((x) => {
         const v = ev[x.id];
         const vLabel = { verified: "✓ found in notes", approximate: "≈ close match", unverified: "✕ not found in notes", missing: "no quote" }[v];
-        return `<li class="finding" id="finding-${esc(x.id)}" data-src="${esc(x.source)}">
+        return `<li class="finding" id="finding-${esc(x.id)}" data-src="${esc(x.source)}"${S.srcFilter && S.srcFilter !== x.source ? " hidden" : ""}>
           <div class="finding-top"><span class="fid">${esc(x.id || "")}</span><span class="src">${esc(SRC_LABEL[x.source] || "")}</span><span class="dom">${esc(x.domain || "")}</span></div>
           ${x.statement ? `<p class="stmt">${txt(x.statement)}</p>` : ""}
           ${x.evidence ? `<div class="quote"><q class="${URDU_RE.test(x.evidence) ? "urdu" : ""}">${esc(x.evidence)}</q>${!streaming ? `<div class="quote-meta">${vLabel ? `<span class="v ${v}">${vLabel}</span>` : ""}<button class="link show-src" data-quote="${esc(x.evidence)}">Show in notes</button></div>` : ""}</div>` : ""}
@@ -438,13 +452,123 @@ function renderAnalysis(a, streaming, lang) {
     parts.push(`<div class="block"><h3>Clinical reasoning</h3><ol class="reasoning">` + reasoning.map((r) =>
       `<li>${txt(r.point)} ${basisChips(r.basis)}${r.limitation ? `<p>Limitation: ${txt(r.limitation)}</p>` : ""}</li>`).join("") + `</ol></div>`);
   }
-  const missing = a.missing_information || [], contra = a.contradictions || [];
-  if (missing.length) parts.push(`<div class="block"><h3>Missing from the notes</h3><ul class="plain">${missing.map((m) => `<li>${txt(m)}</li>`).join("")}</ul></div>`);
+  const contra = a.contradictions || [];
   if (contra.length) parts.push(`<div class="block"><h3>Contradictions</h3><ul class="plain">${contra.map((m) => `<li>${txt(m)}</li>`).join("")}</ul></div>`);
 
   if (streaming) parts.push(`<p class="hint cursor">${findings.length ? "Analysing" : "Reading your notes"}</p>`);
   $("analysis").innerHTML = parts.join("");
 }
+/* ------------------------------------------------------------------ gaps: what may be missing */
+function allGaps(aiGaps) {
+  // Code checklist first within each priority: it is deterministic. Then the AI's clinical gaps.
+  const rank = { high: 0, medium: 1, low: 2 };
+  const list = [...(S.facts?.checklist_gaps || []), ...(aiGaps || [])];
+  return list.sort((a, b) => (rank[a.priority] ?? 1) - (rank[b.priority] ?? 1));
+}
+function renderGaps(aiGaps, streaming) {
+  const gaps = allGaps(aiGaps);
+  if (!gaps.length) return "";
+  const open = gaps.filter((g) => !S.gapState[g.id]).length;
+  const groups = ["documentation", "assessment", "question"].map((kind) => {
+    const items = gaps.filter((g) => (g.kind || "documentation") === kind);
+    if (!items.length) return "";
+    return `<div class="gap-group"><h4>${GAP_KIND[kind]}</h4>` + items.map((g) => gapCard(g, streaming)).join("") + `</div>`;
+  }).join("");
+  const update = S.answersAdded && !streaming
+    ? `<div class="update-bar"><span>You added ${S.answersAdded} answer${S.answersAdded > 1 ? "s" : ""} to your notes.</span><button class="btn sm primary" data-gact="update">Update note</button></div>` : "";
+  return `<div class="block gaps-block" id="gapsBlock"><h3>What may be missing <span class="count">${open} open</span></h3>
+    <p class="fine gaps-intro">Answer what you know, plan what you want to check next time, and dismiss what does not apply. Nothing here goes into the note unless you add it.</p>
+    ${update}${groups}</div>`;
+}
+function gapCard(g, streaming) {
+  const st = S.gapState[g.id];
+  const head = `<div class="gap-top"><span class="pri ${esc(g.priority)}">${esc(g.priority === "high" ? "Important" : g.priority === "medium" ? "Useful" : "Minor")}</span>` +
+    `${g.origin === "checklist" ? '<span class="tag" title="Detected by a fixed checklist, not by the AI">Checklist</span>' : ""}` +
+    `<span class="gid">${esc(g.id)}</span></div>`;
+  if (st?.status === "dismissed") {
+    return `<div class="gap done" data-gap="${esc(g.id)}"><p class="gap-item">${txt(g.item)}</p><div class="gap-done-row"><span>Marked not relevant</span><button class="link" data-gact="undo">Undo</button></div></div>`;
+  }
+  if (st?.status === "answered" || st?.status === "planned") {
+    const what = st.status === "answered" ? `Added to your notes: “${txt(st.answer)}”` : "Added to the Plan for next session";
+    return `<div class="gap done ok" data-gap="${esc(g.id)}"><p class="gap-item">${txt(g.item)}</p><div class="gap-done-row"><span>✓ ${what}</span></div></div>`;
+  }
+  const actions = streaming || S.signed ? "" : `<div class="gap-actions">
+      <button class="btn sm" data-gact="answer">Add answer</button>
+      ${g.kind === "assessment" || g.kind === "question" ? '<button class="btn sm ghost" data-gact="plan">Plan for next session</button>' : ""}
+      <button class="link muted" data-gact="dismiss">Not relevant</button></div>
+    <div class="gap-answer" hidden><textarea rows="2" maxlength="600" placeholder="Your answer, e.g. moderate, most days, since about 3 months, worse at school" aria-label="Answer for ${esc(g.item)}"></textarea>
+      <div class="gap-answer-row"><button class="btn sm primary" data-gact="save">Add to notes</button><button class="btn sm ghost" data-gact="cancel">Cancel</button></div></div>`;
+  return `<div class="gap" data-gap="${esc(g.id)}">${head}<p class="gap-item">${txt(g.item)} ${basisChips(g.basis)}</p>` +
+    (g.why ? `<p class="gap-why">${txt(g.why)}</p>` : "") +
+    (g.ask ? `<p class="gap-ask"><b>Ask:</b> ${txt(g.ask)}</p>` : "") + actions + `</div>`;
+}
+function findGap(id) { return allGaps(S.draft?.analysis?.gaps).find((g) => g.id === id); }
+function refreshAnalysis() { if (S.draft) renderAnalysis(S.draft.analysis, false, S.draft.input_language); renderExtras(); }
+$("analysis").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-gact]"); if (!b) return;
+  const act = b.dataset.gact;
+  if (act === "update") { generate(); return; }
+  const card = b.closest("[data-gap]"); const g = card && findGap(card.dataset.gap); if (!g) return;
+  if (act === "answer") { const box = card.querySelector(".gap-answer"); box.hidden = false; box.querySelector("textarea").focus(); }
+  else if (act === "cancel") card.querySelector(".gap-answer").hidden = true;
+  else if (act === "save") {
+    const answer = card.querySelector("textarea").value.trim();
+    if (!answer) { card.querySelector("textarea").focus(); return; }
+    // The answer becomes part of the clinician's own notes, so the next draft treats it as their words.
+    const label = (g.label || g.item).replace(/[()]/g, "").replace(/[.:\s]+$/, "").slice(0, 100);
+    notes.value = notes.value.replace(/\s+$/, "") + `\nClarification (${label}): ${answer.replace(/\n+/g, " ")}`;
+    updateCount();
+    S.gapState[g.id] = { status: "answered", answer }; S.answersAdded++;
+    refreshAnalysis(); toast("Added to your notes. Press Update note when you are ready.");
+  } else if (act === "dismiss") {
+    S.gapState[g.id] = { status: "dismissed" };
+    const key = g.origin === "checklist" ? g.key : g.item;
+    if (key && !S.dismissed.includes(key)) S.dismissed.push(key);
+    refreshAnalysis();
+  } else if (act === "undo") {
+    delete S.gapState[g.id];
+    const key = g.origin === "checklist" ? g.key : g.item;
+    S.dismissed = S.dismissed.filter((k) => k !== key);
+    refreshAnalysis();
+  } else if (act === "plan") {
+    if (!S.draft || S.signed) return;
+    const plan = S.draft.soap.plan.filter((x) => !/not documented/i.test(x.text));
+    const what = g.item.replace(/\s+(?:was |were |is |are )?not (?:documented|assessed|stated|recorded|checked)\.?$/i, "").replace(/\.$/, "");
+    const text = g.kind === "question" ? `Next session: ask ${g.ask || what}` : `Next session: assess ${what.charAt(0).toLowerCase()}${what.slice(1)}.`;
+    plan.push({ text, basis: [g.id], edited: true, origin: "clinician" });
+    S.draft.soap.plan = plan;
+    S.gapState[g.id] = { status: "planned" };
+    renderSection("plan"); refreshAnalysis(); updateNoteState(); recheck();
+    toast("Added to the Plan. Edit the wording there if needed.");
+    if (matchMedia("(max-width: 820px)").matches) { setView("note"); }
+    document.querySelector('.sec[data-sec="plan"] .stmt-row:last-child .stmt-text')?.focus();
+  }
+});
+$("analysis").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && e.target.matches(".gap-answer textarea")) {
+    e.preventDefault(); e.stopPropagation(); e.target.closest("[data-gap]").querySelector('[data-gact="save"]').click();
+  }
+});
+
+/* Legend = counts per source. Click a source to show only those findings; click again to show all. */
+const SRC_ORDER = [["reported", "Reported", "--src-reported"], ["observed", "Observed", "--src-observed"],
+  ["measured", "Measured", "--src-measured"], ["clinician_plan", "Your plan", "--src-plan"], ["context", "Context", "--src-context"]];
+function legend(findings, streaming) {
+  const n = Object.fromEntries(SRC_ORDER.map(([k]) => [k, findings.filter((f) => f.source === k).length]));
+  if (S.srcFilter && !n[S.srcFilter]) S.srcFilter = null;
+  return `<div class="legend" role="group" aria-label="Filter findings by source">` + SRC_ORDER.map(([k, label, c]) => {
+    const on = S.srcFilter === k, empty = !n[k];
+    return `<button class="leg${on ? " on" : ""}${empty ? " empty" : ""}" style="--c:var(${c})" data-src-filter="${k}" ${empty || streaming ? "disabled" : ""}
+      aria-pressed="${on}" title="${empty ? `No ${label.toLowerCase()} findings in these notes` : on ? "Show all findings" : `Show only ${label.toLowerCase()} findings`}">${label} <b>${n[k]}</b></button>`;
+  }).join("") + (S.srcFilter ? `<button class="link" data-src-filter="">Show all</button>` : "") + `</div>`;
+}
+$("analysis").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-src-filter]"); if (!b || b.disabled) return;
+  const k = b.dataset.srcFilter;
+  S.srcFilter = !k || S.srcFilter === k ? null : k;
+  if (S.draft) renderAnalysis(S.draft.analysis, false, S.draft.input_language);
+});
+
 function basisChips(ids) {
   if (!ids || !ids.length) return "";
   const src = Object.fromEntries((S.draft?.analysis?.findings || []).map((f) => [f.id, f]));
@@ -457,8 +581,9 @@ document.addEventListener("click", (e) => {
   if (show) showInNotes(show.dataset.quote);
 });
 function gotoFinding(id) {
-  const el = document.getElementById("finding-" + id);
+  let el = document.getElementById("finding-" + id);
   if (!el) return;
+  if (el.hidden) { S.srcFilter = null; renderAnalysis(S.draft.analysis, false, S.draft.input_language); el = document.getElementById("finding-" + id); }
   if (matchMedia("(max-width: 820px)").matches) setView("analysis");
   el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
   el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1600);
@@ -481,7 +606,7 @@ function renderSoapPreview(soap) {
     const items = soap[key];
     if (!items) return "";
     return `<section class="sec"><div><div class="letter">${letter}</div><div class="sec-name">${name}</div></div><div class="sec-body"><div class="stmts">` +
-      items.map((s) => `<div class="stmt-row"><div class="stmt-text">${txt(s.text || "")}</div><div class="chips">${(s.basis || []).map((b) => `<span class="chip">${esc(b)}</span>`).join("")}</div></div>`).join("") +
+      items.map((s) => `<div class="stmt-row${s.origin === "ai_proposed" ? " proposed" : ""}"><div class="stmt-text">${s.origin === "ai_proposed" ? '<span class="ai-badge">AI proposal</span>' : ""}${txt(s.text || "")}</div><div class="chips">${(s.basis || []).map((b) => `<span class="chip">${esc(b)}</span>`).join("")}</div></div>`).join("") +
       `</div></div></section>`;
   }).join("") + '<p class="hint cursor">Writing</p>';
 }
@@ -506,12 +631,23 @@ function renderSection(key) {
   const wrap = document.querySelector(`.sec[data-sec="${key}"] .stmts`);
   const src = Object.fromEntries((S.draft.analysis.findings || []).map((f) => [f.id, f]));
   const editable = S.signed ? "false" : PLAINTEXT_OK ? "plaintext-only" : "true";
-  wrap.innerHTML = S.draft.soap[key].map((s, i) => `
-    <div class="stmt-row" data-sec="${key}" data-i="${i}">
-      <div class="stmt-text ${/not documented/i.test(s.text) ? "nd" : ""} ${URDU_RE.test(s.text) ? "urdu" : ""}" contenteditable="${editable}" role="textbox" aria-multiline="true" aria-label="${key} statement ${i + 1}" spellcheck="true">${esc(s.text)}</div>
+  wrap.innerHTML = S.draft.soap[key].map((s, i) => {
+    const prop = s.origin === "ai_proposed", pend = isPending(s);
+    const decision = !prop ? "" : pend
+      ? `<div class="proposal-bar"><span class="ai-badge">AI proposal</span>${ACTION_LABEL[s.action] ? `<span class="act-badge ${esc(s.action)}">${ACTION_LABEL[s.action]}</span>` : ""}${s.rationale ? `<span class="why">${txt(s.rationale)}</span>` : ""}
+          ${S.signed ? "" : `<span class="decide"><button class="btn sm primary" data-act="accept">Accept</button><button class="btn sm ghost" data-act="reject">Reject</button></span>`}</div>`
+      : `<div class="proposal-bar accepted"><span class="ai-badge ok">AI proposal · accepted</span>${ACTION_LABEL[s.action] ? `<span class="act-badge ${esc(s.action)}">${ACTION_LABEL[s.action]}</span>` : ""}${s.rationale ? `<span class="why">${txt(s.rationale)}</span>` : ""}
+          ${S.signed ? "" : '<button class="link muted" data-act="unaccept">Undo</button>'}</div>`;
+    return `
+    <div class="stmt-row${prop ? " proposed" : ""}${pend ? " pending" : ""}" data-sec="${key}" data-i="${i}">
+      <div class="stmt-main">
+        <div class="stmt-text ${/not documented/i.test(s.text) ? "nd" : ""} ${URDU_RE.test(s.text) ? "urdu" : ""}" contenteditable="${editable}" role="textbox" aria-multiline="true" aria-label="${key} statement ${i + 1}${prop ? ", AI proposal" : ""}" spellcheck="true">${esc(s.text)}</div>
+        ${decision}
+      </div>
       <div class="chips">${(s.basis || []).map((b) => `<button class="chip ${esc(src[b]?.source || "")}" data-goto="${esc(b)}" title="${esc(src[b]?.statement || "")}">${esc(b)}</button>`).join("")}${s.edited ? '<span class="chip edited" title="Changed by you">edited</span>' : ""}</div>
       <button class="del" data-act="del" aria-label="Remove this line" title="Remove line">×</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 let recheckTimer;
 $("soap").addEventListener("input", (e) => {
@@ -531,11 +667,19 @@ $("soap").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-act]"); if (!btn || S.signed) return;
   const sec = btn.closest(".sec"); const key = sec?.dataset.sec; if (!key) return;
   const act = btn.dataset.act;
-  if (act === "del") {
+  if (act === "accept" || act === "unaccept") {
+    const item = S.draft.soap[key][+btn.closest(".stmt-row").dataset.i];
+    item.decision = act === "accept" ? "accepted" : "pending";
+    S.confirmSign = false; renderSection(key); updateNoteState(); recheck();
+    return;
+  }
+  if (act === "del" || act === "reject") {
     const i = +btn.closest(".stmt-row").dataset.i;
+    const removed = S.draft.soap[key][i];
+    if (removed?.origin === "ai_proposed") (S.draft.rejected ||= []).push(removed.text);
     S.draft.soap[key].splice(i, 1);
-    if (!S.draft.soap[key].length) S.draft.soap[key].push({ text: "Not documented in session input.", basis: [] });
-    renderSection(key); recheck();
+    if (!S.draft.soap[key].length) S.draft.soap[key].push({ text: key === "plan" ? "Plan not documented in session input." : "Not documented in session input.", basis: [] });
+    renderSection(key); updateNoteState(); recheck();
   } else if (act === "add") {
     S.draft.soap[key].push({ text: "", basis: [], edited: true });
     renderSection(key);
@@ -557,7 +701,7 @@ async function rewriteSection(key, sec) {
   try {
     const r = await apiJSON("/api/scribe/regenerate", {
       input: S.runInput, context: S.runContext, analysis: S.draft.analysis, soap: S.draft.soap,
-      section: key, instruction: box.querySelector("input").value.trim(),
+      dismissed_gaps: S.dismissed, section: key, instruction: box.querySelector("input").value.trim(),
     });
     S.draft.soap[key] = r.statements; S.checks = r.checks;
     renderSection(key); renderChecks(); markFlags(); box.hidden = true; box.querySelector("input").value = "";
@@ -568,7 +712,7 @@ async function rewriteSection(key, sec) {
 async function recheck() {
   if (!S.draft) return;
   try {
-    S.checks = await apiJSON("/api/scribe/check", { input: S.runInput, context: S.runContext, analysis: S.draft.analysis, soap: S.draft.soap });
+    S.checks = await apiJSON("/api/scribe/check", { input: S.runInput, context: S.runContext, analysis: S.draft.analysis, soap: S.draft.soap, dismissed_gaps: S.dismissed });
     renderChecks(); markFlags();
   } catch { /* checks are advisory; keep the last result */ }
 }
@@ -602,28 +746,28 @@ function markFlags() {
   }
 }
 
-/* ------------------------------------------------------------------ suggestions + questions */
+/* ------------------------------------------------------------------ gap summary under the note */
 function renderExtras() {
-  const d = S.draft; const out = [];
-  if (d.suggestions.length) {
-    out.push(`<div><h3>Suggestions to consider</h3>` + d.suggestions.map((s, i) =>
-      `<div class="sugg"><p>${txt(s.suggestion)}<small>${txt(s.rationale || "")} ${basisChips(s.basis)}</small></p><button class="btn sm ghost" data-sugg="${i}">Add to plan</button></div>`).join("") +
-      `<p class="fine">Not part of the note unless you add them.</p></div>`);
+  if (!S.draft) { $("extras").innerHTML = ""; return; }
+  const gaps = allGaps(S.draft.analysis.gaps);
+  const open = gaps.filter((g) => !S.gapState[g.id]);
+  const high = open.filter((g) => g.priority === "high").length;
+  const out = [];
+  if (S.answersAdded) {
+    out.push(`<div class="update-bar"><span>You added ${S.answersAdded} answer${S.answersAdded > 1 ? "s" : ""} to your notes. The note does not include them yet.</span><button class="btn sm primary" data-xact="update">Update note</button></div>`);
   }
-  if (d.follow_up_questions.length) {
-    out.push(`<div><h3>Questions that would complete the note</h3><ul class="plain">${d.follow_up_questions.map((q) => `<li>${txt(q)}</li>`).join("")}</ul><p class="fine">Add the answers to your notes and draft again.</p></div>`);
+  if (open.length) {
+    out.push(`<div class="gap-summary"><span><b>${open.length}</b> possible gap${open.length > 1 ? "s" : ""} in the record${high ? `, <b>${high}</b> important` : ""}.</span><button class="link" data-xact="gaps">Review what may be missing</button></div>`);
   }
   $("extras").innerHTML = out.join("");
 }
 $("extras").addEventListener("click", (e) => {
-  const b = e.target.closest("[data-sugg]"); if (!b || S.signed) return;
-  const s = S.draft.suggestions[+b.dataset.sugg];
-  const plan = S.draft.soap.plan.filter((x) => !/not documented/i.test(x.text));
-  plan.push({ text: s.suggestion, basis: s.basis || [], edited: true });
-  S.draft.soap.plan = plan;
-  renderSection("plan"); recheck();
-  b.disabled = true; b.textContent = "Added";
-  updateNoteState();
+  const b = e.target.closest("[data-xact]"); if (!b) return;
+  if (b.dataset.xact === "update") generate();
+  else if (b.dataset.xact === "gaps") {
+    if (matchMedia("(max-width: 820px)").matches) setView("analysis");
+    $("gapsBlock")?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  }
 });
 
 /* ------------------------------------------------------------------ sign + export */
@@ -632,7 +776,9 @@ function updateNoteState() {
   if (!S.draft) return;
   if (S.signed) { st.textContent = `Signed by ${S.signed.by}`; st.className = "note-state signed"; $("signBtn").textContent = "Unlock to amend"; $("signBtn").className = "btn ghost"; return; }
   const edited = SECTIONS.some(([k]) => S.draft.soap[k].some((s) => s.edited));
-  st.textContent = edited ? "Edited draft, not signed" : "AI draft, not signed"; st.className = "note-state";
+  const pend = S.draft.soap.plan.filter(isPending).length;
+  st.textContent = pend ? `${pend} AI proposal${pend > 1 ? "s" : ""} to accept or reject` : edited ? "Edited draft, not signed" : "AI draft, not signed";
+  st.className = "note-state" + (pend ? " pending" : "");
   const high = S.checks?.counts?.high || 0;
   $("signBtn").className = "btn primary";
   $("signBtn").textContent = S.confirmSign ? `Sign with ${high} unresolved check${high > 1 ? "s" : ""}` : "Sign note";
@@ -644,6 +790,12 @@ $("signBtn").addEventListener("click", () => {
   if (!who) { $("contextBox").open = true; if (matchMedia("(max-width: 820px)").matches) setView("input"); $("clinician").focus(); toast("Enter your name under Patient context to sign.", true); return; }
   const empty = SECTIONS.some(([k]) => S.draft.soap[k].some((s) => !s.text.trim()));
   if (empty) { toast("Remove or fill the empty lines first.", true); return; }
+  const pend = S.draft.soap.plan.filter(isPending).length;
+  if (pend) {
+    toast(`Accept or reject the ${pend} AI-proposed plan item${pend > 1 ? "s" : ""} before signing.`, true);
+    document.querySelector(".stmt-row.pending")?.scrollIntoView({ block: "center" });
+    return;
+  }
   if ((S.checks?.counts?.high || 0) && !S.confirmSign) { S.confirmSign = true; updateNoteState(); toast("There are unresolved checks. Review them, or press sign again to confirm."); return; }
   S.signed = { by: who, at: new Date().toLocaleString() };
   buildSoapEditor(); updateNoteState();
@@ -661,7 +813,17 @@ function noteText() {
   if (h.session_date) lines.push(`Date: ${h.session_date}`);
   if (h.discipline) lines.push(`Discipline: ${h.discipline}`);
   lines.push("");
-  for (const [k, , name] of SECTIONS) { lines.push(name); S.draft.soap[k].forEach((s) => s.text.trim() && lines.push(`- ${s.text.trim()}`)); lines.push(""); }
+  let proposed = false;
+  for (const [k, , name] of SECTIONS) {
+    lines.push(name);
+    S.draft.soap[k].forEach((s) => {
+      if (!s.text.trim() || isPending(s)) return;   // undecided proposals are not part of the note
+      const mark = s.origin === "ai_proposed" ? " †" : ""; proposed ||= !!mark;
+      lines.push(`- ${s.text.trim()}${mark}`);
+    });
+    lines.push("");
+  }
+  if (proposed) lines.push("† Proposed by the AI assistant and accepted by the treating clinician.", "");
   lines.push(S.signed ? `Signed by ${S.signed.by}, ${S.signed.at}` : "Unsigned draft. Clinician review required.");
   return lines.join("\n");
 }
@@ -688,6 +850,7 @@ $("newSession").addEventListener("click", () => {
   S.abort?.abort(); if (R.recording) stopDictation();
   notes.value = ""; ["patientAge", "diagnosis", "goals", "previousNote", "patientId"].forEach((id) => ($(id).value = ""));
   S.draft = null; S.checks = null; S.facts = null; S.signed = null; S.runInput = "";
+  S.gapState = {}; S.dismissed = []; S.answersAdded = 0;
   R.segs = []; R.nextInsert = 0; R.segIndex = 0; renderSegments();
   resetPipeline();
   $("analysis").innerHTML = '<div class="empty"><p>The analysis appears here first: what was reported, observed and measured, progress against goals, and the reasoning the note is built on.</p></div>';

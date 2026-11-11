@@ -222,7 +222,7 @@ def build_mock_draft(session_input: str, ctx: dict[str, str]) -> dict[str, Any]:
                                     "basis": measured[:3], "limitation": "Rule-based mock output."}] if measured else [],
             "risk_flags": [{"flag": f["category"].replace("_", " "), "severity": f["severity"],
                             "evidence": f["match"], "recommended_action": f["guidance"]} for f in facts["red_flags"]],
-            "missing_information": [] if facts["cue_levels"] else ["Cue level not stated."],
+            "gaps": _mock_gaps(session_input, measured),
             "contradictions": [],
         },
         "soap": {
@@ -230,12 +230,27 @@ def build_mock_draft(session_input: str, ctx: dict[str, str]) -> dict[str, Any]:
             "objective": section("observed", "measured"),
             "assessment": [{"text": "Mock assessment: review the objective findings against the goals.",
                             "basis": measured[:3]}] if measured else [{"text": "Not documented in session input.", "basis": []}],
-            "plan": section("clinician_plan", empty="Plan not documented in session input."),
+            "plan": [{"text": f["statement"], "basis": [f["id"]], "origin": "clinician", "rationale": ""}
+                     for f in findings if f["source"] == "clinician_plan"] + [
+                {"text": "Mock proposal: re-probe the measured targets next session to confirm the trend.",
+                 "basis": measured[:2], "origin": "ai_proposed", "action": "assess",
+                 "rationale": "One session of data is not enough to judge progress."}],
         },
-        "suggestions": [{"suggestion": "State the cue level for each target.", "rationale": "Supports cue-fading decisions.",
-                         "basis": []}] if not facts["cue_levels"] else [],
-        "follow_up_questions": ["What did the caregiver report about home practice?"] if not ids("reported") else [],
     }
+
+
+def _mock_gaps(session_input: str, measured: list[str]) -> list[dict[str, Any]]:
+    gaps = []
+    if not re.search(r"stimulab", session_input, re.I):
+        gaps.append({"id": "G1", "kind": "assessment", "priority": "medium",
+                     "item": "Stimulability for the error sounds not documented",
+                     "why": "Stimulability helps decide which target to treat next.",
+                     "ask": "Was the child stimulable for the error sounds with a model?", "basis": measured[:1]})
+    gaps.append({"id": f"G{len(gaps) + 1}", "kind": "question", "priority": "low",
+                 "item": "Mock gap: rule-based demo, not clinical judgement",
+                 "why": "AI_PROVIDER=mock does not analyse clinically.", "ask": "Switch to the OpenAI engine for real gaps.",
+                 "basis": []})
+    return gaps
 
 
 class MockProvider(Provider):

@@ -31,14 +31,14 @@ class Settings:
     provider: str = os.getenv("AI_PROVIDER", "openai").strip().lower()  # openai | mock
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "").strip()
-    clinical_model: str = os.getenv("OPENAI_CLINICAL_MODEL", "gpt-4.1-mini").strip()
+    clinical_model: str = os.getenv("OPENAI_CLINICAL_MODEL", "gpt-5.4-mini").strip()
     transcription_model: str = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-transcribe").strip()
-    reasoning_effort: str = os.getenv("OPENAI_REASONING_EFFORT", "").strip()  # only for reasoning models
+    reasoning_effort: str = os.getenv("OPENAI_REASONING_EFFORT", "low").strip()  # only for reasoning models
 
     # Time limits (seconds). A stalled stream is cut off instead of loading forever.
     connect_timeout: float = _float("AI_CONNECT_TIMEOUT", 10)
-    stream_idle_timeout: float = _float("AI_STREAM_IDLE_TIMEOUT", 40)
-    pipeline_timeout: float = _float("AI_PIPELINE_TIMEOUT", 150)
+    stream_idle_timeout: float = _float("AI_STREAM_IDLE_TIMEOUT", 90)
+    pipeline_timeout: float = _float("AI_PIPELINE_TIMEOUT", 180)
     transcribe_timeout: float = _float("AI_TRANSCRIBE_TIMEOUT", 60)
     max_retries: int = _int("AI_MAX_RETRIES", 1)
     max_concurrent_ai: int = _int("AI_MAX_CONCURRENT", 8)
