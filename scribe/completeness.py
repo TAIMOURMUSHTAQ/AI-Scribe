@@ -47,8 +47,14 @@ _REPORTED = re.compile(r"\b(mother|mom|mum|father|dad|parents?|caregiver|teacher
                        r"reports?|reported|said|says|states?|complain\w*|c/o|finds|feels|"
                        r"ammi|abbu|walida|walid|bataya|kaha|according)\b", re.I)
 _CAREGIVER_REPORT = _REPORTED
-_HOME = re.compile(r"\b(hep|home\s*(?:practice|programme|program|work|exercises?)|homework|ghar\s+pe|practi[cs]ed?\s+at\s+home)\b", re.I)
-_PLAN = re.compile(r"\b(plan|next\s+session|nxt|continue|f/u|follow[-\s]?up|agle\s+session|will\s+(?:target|work|continue|start|focus))\b", re.I)
+_HOME = re.compile(r"\b(hep|home\s*(?:practice|programme|program|work|exercises?)|homework|ghar\s+pe|practi[cs]ed?\s+at\s+home|"
+                   r"carry[-\s]?over\s+(?:at\s+)?home|(?:parent|home|caregiver)\s+carry[-\s]?over)\b", re.I)
+# A plan is often written without the word "plan": "weekly 45-min sessions", "tx 1x/wk", "homework", "review in 3 months".
+PLAN_LIKE = re.compile(r"\b(plan\w*|next\s+session|nxt|continue|f/u|follow[-\s]?up|agle\s+session|"
+                       r"will\s+(?:target|work|continue|start|focus|review|begin|introduce)|weekly|fortnightly|"
+                       r"\d+\s*x\s*/\s*(?:wk|week)|(?:sessions?|times?)\s+(?:per|a)\s+week|per\s+week|homework|hep|"
+                       r"next\s+review|review\s+(?:on|in|after)|re-?assess\w*\s+(?:in|after)|start\w*\s+\w+\s+programme)\b", re.I)
+_PLAN = PLAN_LIKE
 _LEVEL = re.compile(r"\b(isolation|syllables?|words?|phrases?|sentences?|conversation\w*|connected\s+speech|"
                     r"structured|spontaneous|imitation|reading|narrative)\b", re.I)
 _ANY_CUE = re.compile(r"\b(cue\w*|cuing|prompt\w*|independent\w*|model(?:l)?ing|imitation|gestur\w*|assist\w*|"
@@ -124,7 +130,7 @@ def checklist_gaps(session_input: str, ctx: dict[str, str], facts: dict[str, Any
     is_slp = not discipline or "speech" in discipline or "language" in discipline
     has_measure = bool(facts.get("measurements")) or bool(facts.get("percentages_stated"))
     gaps: list[dict[str, Any]] = []
-    is_fluency = bool(_FLUENCY.search(text))
+    is_fluency = any(not _NEGATED.search(text[max(0, m.start() - 60):m.start()]) for m in _FLUENCY.finditer(text))
 
     def add(key: str, kind: str, priority: str, item: str, why: str, ask: str, label: str = "") -> None:
         if key.lower() in dismissed_set:

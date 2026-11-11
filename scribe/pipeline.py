@@ -13,7 +13,7 @@ import uuid
 from typing import Any, AsyncIterator
 
 from .config import settings
-from .completeness import checklist_for_prompt, checklist_gaps, drop_checklist_duplicates
+from .completeness import PLAN_LIKE, checklist_for_prompt, checklist_gaps, drop_checklist_duplicates
 from .facts import check_draft, extract_facts, facts_for_prompt
 from .partial_json import parse_partial
 from .prompts import (PROMPT_VERSION, REGENERATE_SYSTEM_PROMPT, SYSTEM_PROMPT, build_draft_message,
@@ -77,19 +77,36 @@ def _plan_list(value: Any) -> list[dict[str, Any]]:
     return out or [{"text": PLAN_EMPTY, "basis": [], "origin": "clinician", "rationale": ""}]
 
 
+def _stems(text: str) -> set[str]:
+    return {w[:5] for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 or w.isdigit()}
+
+
+def _is_own_plan(item_text: str, quote: str) -> bool:
+    """The quote is the clinician's words, reads like a plan, and the plan item restates it."""
+    if not quote or not PLAN_LIKE.search(quote):
+        return False
+    q = _stems(quote)
+    return bool(q) and len(q & _stems(item_text)) / len(q) >= 0.5
+
+
 def _enforce_plan_rules(draft: dict[str, Any]) -> None:
     """Code backstops for what the prompt asks but a model may not always do.
 
-    1. A "clinician" plan item must rest on something the clinician stated as a plan. If its basis
-       cites only other findings, it was the AI's idea: it becomes a proposal awaiting a decision.
+    1. A "clinician" plan item must rest on something the clinician stated as a plan. It stays the
+       clinician's if it cites a clinician_plan finding, or a finding whose verbatim quote reads like a
+       plan ("weekly 45-min sessions, homework") and matches the item's wording: the model sometimes
+       files an unlabelled plan as context. Otherwise (e.g. "assessed on SSI" turned into a plan item)
+       it was the AI's idea and becomes a proposal awaiting a decision.
     2. At most one proposal about documenting/asking for information (the gaps panel holds the rest),
        as long as at least two other proposals remain.
     """
-    sources = {str(f.get("id")): f.get("source") for f in draft["analysis"].get("findings") or []}
+    findings = {str(f.get("id")): f for f in draft["analysis"].get("findings") or []}
     plan = draft["soap"]["plan"]
     for item in plan:
-        cited = [sources[b] for b in item["basis"] if b in sources]
-        if item["origin"] == "clinician" and cited and "clinician_plan" not in cited:
+        cited = [findings[b] for b in item["basis"] if b in findings]
+        if item["origin"] != "clinician" or not cited or any(f.get("source") == "clinician_plan" for f in cited):
+            continue
+        if not any(_is_own_plan(item["text"], str(f.get("evidence") or "")) for f in cited):
             item.update(origin="ai_proposed", decision="pending",
                         rationale=item["rationale"] or "You did not write this as a plan; proposed from your findings.")
     proposals = [p for p in plan if p["origin"] == "ai_proposed"]

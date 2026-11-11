@@ -53,6 +53,9 @@ STEP 1: CLINICAL ANALYSIS (complete this before writing the SOAP note)
      * What the clinician saw or heard in the session, and tests the clinician gave: "observed".
      * Any test score, count, rating or percentage obtained in the session (e.g. "SSI score 8",
        "6% SS", "14/20"): "measured". A parent's rating ("mother rates 4/10") stays "reported".
+     * A next step the clinician wrote, with or without the word "Plan" (e.g. "weekly 45-min
+       sessions", "tx 1x/wk", "homework: phone practice", "review in 3 months"):
+       "clinician_plan".
      * A Clarification line is the clinician's own words: classify it by its content with the
        same rules (a parent's answer is "reported", a session measure is "measured").
    - An unfinished or cut-off sentence (e.g. "child hesitates while") must NOT be completed or

@@ -42,7 +42,8 @@ _OUT_OF = re.compile(r"\b(\d{1,3})\s*(?:out\s+of|of|outta)\s*(\d{1,3})\b", re.I)
 # Roman Urdu: "20 mein se 14" = 14 out of 20
 _URDU_OUT_OF = re.compile(r"\b(\d{1,3})\s*(?:mein|main|mai|men|me)\s+(?:se|sy|say)\s+(\d{1,3})\b", re.I)
 _PERCENT = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b|fisad\b|feesad\b)", re.I)
-_DURATION = re.compile(r"(?<![/\d])\b(\d{1,3})\s*(?:min(?:ute)?s?|mins?)\b", re.I)
+# "45 min", "45-min", "45 minutes" (but not "7/10 min cues")
+_DURATION = re.compile(r"(?<![/\d])\b(\d{1,3})\s*-?\s*(?:min(?:ute)?s?|mins?)\b", re.I)
 _NUMBER = re.compile(r"(?<![\w/])(\d+(?:\.\d+)?)(?![\w])")
 
 _CUE = re.compile(

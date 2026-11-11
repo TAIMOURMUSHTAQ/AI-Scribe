@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .venv-1/
 .DS_Store
+lingualink360_ai_scribe/
+results.json

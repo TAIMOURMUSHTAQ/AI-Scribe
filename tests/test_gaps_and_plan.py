@@ -276,3 +276,33 @@ def test_assessment_gap_repeating_onset_or_ss_is_dropped_but_others_kept():
           {"id": "G2", "kind": "assessment", "item": "Child awareness and emotional reaction not documented.", "ask": ""}]
     kept, dropped = drop_checklist_duplicates(ai, checklist)
     assert [g["id"] for g in kept] == ["G2"] and "G1" in dropped
+
+
+# ---- fixes after running cases.json (11 Nov 2026) -------------------------------------------
+
+def test_unlabelled_clinician_plan_is_not_relabelled_as_ai():
+    """A1: the model filed the therapist's plan as 'context'; it must stay the therapist's."""
+    d = normalize_draft({"analysis": {"findings": [
+        {"id": "F7", "source": "context", "evidence": "Weekly 45-min sessions, breathing techniques, phone practice homework"},
+        {"id": "F1", "source": "observed", "evidence": "He was assessed on SSI"}]},
+        "soap": {"plan": [
+            {"text": "Weekly 45-minute sessions were planned, using breathing techniques and phone practice homework.",
+             "basis": ["F7"], "origin": "clinician"},
+            {"text": "The clinician assessed the child on the SSI.", "basis": ["F1"], "origin": "clinician"}]}})
+    plan = d["soap"]["plan"]
+    assert plan[0]["origin"] == "clinician"          # the therapist's own words stay theirs
+    assert plan[1]["origin"] == "ai_proposed"        # done-today restated as a plan is still caught
+
+
+def test_hyphenated_session_length_and_unlabelled_plan_and_carryover():
+    keys = {g["key"] for g in gaps_for("Four-year-old boy stutters. Plan: weekly 30-min sessions, parent carryover at home.")}
+    assert not {"duration", "home_programme", "plan"} & keys          # K4
+    keys = {g["key"] for g in gaps_for("Weekly 45-min sessions, breathing techniques.")}
+    assert not {"duration", "plan"} & keys                            # K6
+    assert extract_facts("1x/wk 45-min session")["durations_min"] == [45]
+
+
+def test_negated_blocks_do_not_trigger_stammering_questions():
+    keys = {g["key"] for g in gaps_for("Client's speech is fluent with no blocks observed today.")}   # B5
+    assert not {"onset", "fluency_frequency"} & keys
+    assert "onset" in {g["key"] for g in gaps_for("Client blocks on most words.")}
