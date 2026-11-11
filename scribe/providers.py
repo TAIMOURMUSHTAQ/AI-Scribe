@@ -230,12 +230,22 @@ def build_mock_draft(session_input: str, ctx: dict[str, str]) -> dict[str, Any]:
             "objective": section("observed", "measured"),
             "assessment": [{"text": "Mock assessment: review the objective findings against the goals.",
                             "basis": measured[:3]}] if measured else [{"text": "Not documented in session input.", "basis": []}],
-            "plan": [{"text": f["statement"], "basis": [f["id"]], "origin": "clinician", "rationale": ""}
+            "plan": [{"text": f["statement"], "basis": [f["id"]], "origin": "clinician", "action": "other", "rationale": ""}
                      for f in findings if f["source"] == "clinician_plan"] + [
                 {"text": "Mock proposal: re-probe the measured targets next session to confirm the trend.",
                  "basis": measured[:2], "origin": "ai_proposed", "action": "assess",
                  "rationale": "One session of data is not enough to judge progress."}],
         },
+        "objective_suggestions": [] if measured else [
+            {"id": "M1", "priority": "high", "measure": "Mock measure: accuracy on 20 probe items",
+             "method": "Present 20 probe items for the main target without cues and count correct responses.",
+             "why": "Mock mode: gives an objective baseline for the reported concern.",
+             "record_as": "___/20 correct (___%), cue level ___", "basis": ids("reported")[:1]},
+            {"id": "M2", "priority": "medium", "measure": "Mock measure: connected speech sample",
+             "method": "Record 5 minutes of conversation and note the main error patterns.",
+             "why": "Mock mode: shows whether the difficulty carries into conversation.",
+             "record_as": "Sample ___ min; main patterns: ___", "basis": []},
+        ],
     }
 
 

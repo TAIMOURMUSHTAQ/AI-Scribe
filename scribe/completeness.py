@@ -66,7 +66,8 @@ ASK_HOW_MUCH = ("How much of a problem is it: severity (mild / moderate / severe
 
 
 # Answers added from the gap panel: "Clarification (<what it answers>): <answer>"
-_CLARIFICATION = re.compile(r"^\s*Clarification\s*\((.*?)\)\s*:\s*(.*)$", re.I | re.M)
+# ... and results typed into an Objective suggestion: "Result (<measure>): <value>"
+_CLARIFICATION = re.compile(r"^\s*(?:Clarification|Result)\s*\((.*?)\)\s*:\s*(.*)$", re.I | re.M)
 
 
 def split_clarifications(text: str) -> tuple[str, list[tuple[str, str]]]:
@@ -76,6 +77,24 @@ def split_clarifications(text: str) -> tuple[str, list[tuple[str, str]]]:
     """
     pairs = [(m.group(1).strip(), m.group(2).strip()) for m in _CLARIFICATION.finditer(text or "")]
     return _CLARIFICATION.sub(lambda m: m.group(2), text or ""), pairs
+
+
+_RESULT = re.compile(r"^\s*Result\s*\((.*?)\)\s*:\s*(.*)$", re.I | re.M)
+
+
+def recorded_measures(text: str) -> list[str]:
+    """Measures the clinician has already entered from the Objective guide ("Result (<measure>): <value>")."""
+    return [f"{m.group(1).strip()}: {m.group(2).strip()}" for m in _RESULT.finditer(text or "")]
+
+
+# "% syllables stuttered" / "%SS" is the standard NAME OF A MEASURE, not the clinician naming the condition.
+_MEASURE_NAME = re.compile(r"%?\s*syllables?\s+stuttered|stuttered\s+syllables?|%\s*ss\b", re.I)
+_CONDITION_TERM = re.compile(r"stammer|stutter|haklah|hakla", re.I)
+
+
+def names_condition(text: str) -> bool:
+    """Did the clinician name the condition themselves (ignoring the standard %SS measure name)?"""
+    return bool(_CONDITION_TERM.search(_MEASURE_NAME.sub(" ", text or "")))
 
 
 def _norm(s: str) -> str:
@@ -172,12 +191,14 @@ def checklist_gaps(session_input: str, ctx: dict[str, str], facts: dict[str, Any
             "Which goal targets were probed today, and with what accuracy?")
 
     if is_fluency:
+        # Use the clinician's own word for the condition; if they did not name it, stay neutral.
+        cond = "stammering" if names_condition(text) else "disfluency"
         if not _ONSET.search(text):
-            add("onset", "documentation", "high", "Time since onset of the stammering not stated",
+            add("onset", "documentation", "high", f"Time since onset of the {cond} not stated",
                 "In young children, time since onset is one of the main factors in deciding between monitoring and starting treatment.",
-                "When did the stammering start, and has it changed since (better, worse, coming and going)?")
+                f"When did the {cond} start, and has it changed since (better, worse, coming and going)?")
         if not _FLUENCY_FREQ.search(text):
-            add("fluency_frequency", "documentation", "medium", "Stammering frequency not measured (% syllables stuttered)",
+            add("fluency_frequency", "documentation", "medium", f"{cond.capitalize()} frequency not measured (% syllables stuttered)",
                 "A %SS from a speech sample is the usual baseline for judging change over time.",
                 "What was the % syllables stuttered, from how long a sample, and in which speaking situation?")
 
@@ -229,17 +250,61 @@ _SAME_AS = {
     "home_programme": r"home\s*(?:practice|programme|program|work)|homework|\bhep\b",
     "plan": r"\bplan\b|next session",
     "onset": r"onset|since when|time since|when (?:did )?(?:it|the \w+) (?:start|begin)|started",
-    "fluency_frequency": r"%\s*ss|syllables stuttered|(?:stutter|stammer)\w* frequency|frequency of (?:stutter|stammer|disfluen|dysfluen)",
+    "fluency_frequency": r"%\s*ss|syllables stuttered|(?:stutter|stammer|disfluen|dysfluen)\w* frequency|frequency of (?:stutter|stammer|disfluen|dysfluen)",
     "unfinished": r"incomplete|unfinished|cut off|truncated|ends? mid|trailing",
 }
 # These checklist gaps are complete on their own, so an AI repeat adds nothing even when labelled "assessment".
 _PURE = {"onset", "fluency_frequency", "unfinished"}
 _STOP = {"the", "and", "with", "that", "this", "from", "have", "were", "was", "his", "her", "their", "not", "for",
-         "reported", "reports", "child", "patient", "documented", "stated"}
+         "reported", "reports", "child", "patient", "documented", "stated", "were", "beyond", "assessment",
+         "assessed", "level", "session"}
 
 
 def _content(s: str) -> set[str]:
     return {w for w in _norm(s).split() if len(w) > 3 and w not in _STOP}
+
+
+_MEASURE_WORDS = {"syllables", "syllable", "stuttered", "percent", "sample", "measure", "score", "scores",
+                  "rating", "details", "result", "results"}
+
+
+def drop_recorded_repeats(suggestions: list[dict[str, Any]], recorded: list[str]) -> list[dict[str, Any]]:
+    """Backstop for the prompt rule: drop a suggestion that rewords a measure already recorded.
+
+    Compares distinctive words of the measure names (not the values). 3 of 4 must match, so the next
+    level or another context of the same target survives ("/s/ at sentence level" after "/s/ at word
+    level"; "%SS in picture description" after "%SS in conversation").
+    """
+    labels = [_content(r.split(":", 1)[0]) - _MEASURE_WORDS for r in recorded]
+    kept = []
+    for s in suggestions:
+        words = _content(s.get("measure", "")) - _MEASURE_WORDS
+        if any(words and lab and len(words & lab) / min(len(words), len(lab)) >= 0.75 and len(words & lab) >= 2
+               for lab in labels):
+            continue
+        kept.append(s)
+    return kept
+
+
+def drop_measure_duplicates(ai_gaps: list[dict[str, Any]], measures: list[dict[str, Any]]
+                            ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Remove "assessment" gaps that repeat an Objective measure suggestion (the measure is the
+    actionable version). Returns kept gaps and {dropped gap id: measure id}."""
+    kept, dropped = [], {}
+    sets = [(m["id"], _content(f'{m.get("measure", "")} {m.get("method", "")}')) for m in measures]
+    for g in ai_gaps:
+        words = _content(g.get("item", ""))
+        match = None
+        if g.get("kind") == "assessment" and words:
+            for mid, mwords in sets:
+                if len(words & mwords) / len(words) >= 0.5:
+                    match = mid
+                    break
+        if match:
+            dropped[str(g.get("id"))] = match
+        else:
+            kept.append(g)
+    return kept, dropped
 
 
 def drop_checklist_duplicates(ai_gaps: list[dict[str, Any]], checklist: list[dict[str, Any]],

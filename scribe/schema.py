@@ -72,6 +72,16 @@ DRAFT_SCHEMA: dict[str, Any] = _obj({
     }),
     "soap": _obj({"subjective": STATEMENTS, "objective": STATEMENTS, "assessment": STATEMENTS,
                   "plan": PLAN_STATEMENTS}),
+    # Objective assessment guide: what to measure to answer the reported concern. Never results.
+    "objective_suggestions": {"type": "array", "items": _obj({
+        "id": _STR,
+        "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+        "measure": _STR,
+        "method": _STR,
+        "why": _STR,
+        "record_as": _STR,
+        "basis": _STR_LIST,
+    })},
 })
 
 REGENERATE_SCHEMA: dict[str, Any] = _obj({"statements": STATEMENTS})
@@ -86,7 +96,9 @@ class PatientContext(BaseModel):
     previous_note: str = Field(default="", max_length=8000)
 
     def as_text(self) -> str:
-        return "\n".join(v for v in (self.diagnosis_on_file, self.goals, self.previous_note) if v)
+        # The age is included so "3-year-old" in the note is not flagged as an invented number.
+        age = f"Age: {self.patient_age}" if self.patient_age else ""
+        return "\n".join(v for v in (age, self.diagnosis_on_file, self.goals, self.previous_note) if v)
 
 
 class DraftRequest(BaseModel):
@@ -125,10 +137,11 @@ class Statement(BaseModel):
 
 class CheckRequest(DraftRequest):
     analysis: dict[str, Any] = Field(default_factory=dict)
+    objective_suggestions: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
     soap: dict[str, list[Statement]] = Field(default_factory=dict)
 
     def draft(self) -> dict[str, Any]:
-        return {"analysis": self.analysis,
+        return {"analysis": self.analysis, "objective_suggestions": self.objective_suggestions,
                 "soap": {k: [s.model_dump() for s in v] for k, v in self.soap.items()}}
 
 

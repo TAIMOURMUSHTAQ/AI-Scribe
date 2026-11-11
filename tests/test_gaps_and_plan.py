@@ -306,3 +306,145 @@ def test_negated_blocks_do_not_trigger_stammering_questions():
     keys = {g["key"] for g in gaps_for("Client's speech is fluent with no blocks observed today.")}   # B5
     assert not {"onset", "fluency_frequency"} & keys
     assert "onset" in {g["key"] for g in gaps_for("Client blocks on most words.")}
+
+
+# ---- Objective assessment guide (scribe_v4.3, therapist feedback 11 Nov 2026) ----------------
+
+def test_objective_suggestions_never_carry_values():
+    from scribe.pipeline import blank_values
+    assert blank_values("%SS 6% in conversation (300 syllables)") == "%SS ___% in conversation (300 syllables)"
+    assert blank_values("Longest block 2 seconds") == "Longest block ___ seconds"
+    assert blank_values("/r/ initial 14/20, medial ___/20") == "/r/ initial ___/___, medial ___/20"
+    assert blank_values("") == "___"
+
+
+def test_suggestions_normalised_and_empty_objective_reworded():
+    d = normalize_draft({"soap": {"objective": [{"text": "Not documented in session input.", "basis": []}]},
+                         "objective_suggestions": [
+                             {"id": "x", "measure": "%SS in conversation", "method": "300 syllables",
+                              "why": "Baseline", "record_as": "%SS 4%", "basis": ["F1"], "priority": "urgent"},
+                             {"measure": " "}]})
+    assert d["soap"]["objective"][0]["text"] == "No objective measures were recorded in this session."
+    m = d["objective_suggestions"]
+    assert len(m) == 1 and m[0]["id"] == "M1" and m[0]["priority"] == "medium" and m[0]["record_as"] == "%SS ___%"
+
+
+def test_assessment_gap_repeating_a_measure_is_dropped():
+    from scribe.completeness import drop_measure_duplicates
+    measures = [{"id": "M1", "measure": "Overall intelligibility in connected speech", "method": "Conversation sample"}]
+    gaps = [{"id": "G1", "kind": "assessment", "item": "Intelligibility in connected speech was not documented."},
+            {"id": "G2", "kind": "question", "item": "Intelligibility at school is not described."},
+            {"id": "G3", "kind": "assessment", "item": "Oral-motor structure was not documented."}]
+    kept, dropped = drop_measure_duplicates(gaps, measures)
+    assert [g["id"] for g in kept] == ["G2", "G3"] and dropped == {"G1": "M1"}
+
+
+def test_result_lines_count_as_the_clinicians_words():
+    text = "Mother reports blocks daily since 6 months.\nResult (Stuttering frequency (%SS)): 6% in conversation, 300 syllables"
+    keys = {g["key"] for g in gaps_for(text)}
+    assert "fluency_frequency" not in keys
+
+
+def test_api_returns_objective_suggestions_and_check_accepts_them():
+    final = final_event({"input": "Mother reports he finds it difficult to speak in class."})
+    m = final["draft"]["objective_suggestions"]
+    assert m and m[0]["id"] == "M1"
+    soap = final["draft"]["soap"]
+    soap["plan"].append({"text": "Next session: assess accuracy.", "basis": ["M1"], "origin": "clinician", "edited": True})
+    chk = client.post("/api/scribe/check", json={"input": "Mother reports he finds it difficult to speak in class.",
+                                                 "analysis": final["draft"]["analysis"], "soap": soap,
+                                                 "objective_suggestions": m}).json()
+    assert not any(i["type"] == "unknown_basis" for i in chk["issues"])
+
+
+def test_questions_and_referrals_are_not_objective_measures():
+    d = normalize_draft({"objective_suggestions": [
+        {"measure": "Caregiver report of impact", "method": "Ask the caregiver how it affects routines."},
+        {"measure": "Hearing status", "method": "Complete a brief hearing screen or refer for one."},
+        {"measure": "Receptive language probe", "method": "Give one- and two-step directions; record accuracy."}]})
+    assert [m["measure"] for m in d["objective_suggestions"]] == ["Receptive language probe"]
+
+
+def test_age_from_context_is_an_allowed_number():
+    from scribe.schema import PatientContext
+    ctx = PatientContext(patient_age="3 y")
+    d = {"analysis": {"findings": []}, "soap": {"plan": [{"text": "Discuss options for a 3-year-old.", "origin": "ai_proposed",
+                                                          "decision": "accepted"}]}}
+    assert not any(i["type"] == "unsupported_number" for i in check_draft(d, "speaks few words", ctx.as_text())["issues"])
+
+
+def test_recorded_measures_reach_the_prompt():
+    from scribe.completeness import recorded_measures
+    text = "Pauses and blocks.\nResult (SSI results): SSI-4 total 12, mild\nClarification (onset): 8 months"
+    rec = recorded_measures(text)
+    assert rec == ["SSI results: SSI-4 total 12, mild"]
+    msg = build_draft_message(text, {}, "- facts", "None.", [], rec)
+    assert "<recorded_measures>" in msg and "SSI-4 total 12" in msg.split("<recorded_measures>")[1]
+
+
+def test_checklist_does_not_name_a_condition_the_clinician_did_not_name():
+    items = " ".join(g["item"] + g["ask"] for g in gaps_for("Child has pauses and blocks when talking. Parents are worried."))
+    assert "stammer" not in items.lower() and "disfluency" in items.lower()
+    items = " ".join(g["item"] for g in gaps_for("Mother reports stammering at school."))
+    assert "stammering" in items.lower()
+
+
+def test_measure_names_stay_neutral_when_condition_not_named():
+    from scribe.pipeline import neutral_condition_names
+
+    def draft():
+        return {"objective_suggestions": [{"measure": "Stuttering type profile",
+                                           "method": "Code stuttering moments; count % syllables stuttered.",
+                                           "why": "Shows the stammering pattern.", "record_as": "Stuttered ___"}],
+                "soap": {"plan": [{"text": "Document stuttering types.", "origin": "ai_proposed", "rationale": ""},
+                                  {"text": "Stuttering plan in clinician words.", "origin": "clinician", "rationale": ""}]}}
+    d = draft()
+    # A typed %SS result must not count as the clinician naming the condition.
+    neutral_condition_names(d, "Boy with pauses and blocks.\nResult (Disfluency frequency): 7% syllables stuttered", "")
+    m = d["objective_suggestions"][0]
+    assert m["measure"] == "Disfluency type profile"
+    assert m["method"] == "Code disfluency moments; count % syllables stuttered."
+    assert "stammer" not in m["why"] and m["record_as"] == "Disfluency ___"
+    assert d["soap"]["plan"][0]["text"] == "Document disfluency types."
+    assert d["soap"]["plan"][1]["text"].startswith("Stuttering")      # clinician's words are never changed
+    d = draft()
+    neutral_condition_names(d, "Mother reports stammering.", "")
+    assert d["objective_suggestions"][0]["measure"] == "Stuttering type profile"
+
+
+def test_typed_ss_result_does_not_license_the_label():
+    src = "Pauses and blocks.\nResult (Disfluency frequency): 7% syllables stuttered in conversation"
+    assert "unsupported_term" in _soap_check("Stuttering was observed in conversation.", src)
+
+
+def test_reworded_repeat_of_a_recorded_measure_is_dropped_but_next_level_kept():
+    from scribe.completeness import drop_recorded_repeats
+    recorded = ["Disfluency types and longest duration: part-word repetitions; longest 3 seconds",
+                "Disfluency frequency % syllables stuttered in conversation: 7%",
+                "/s/ accuracy at word level: 14/20"]
+    sugg = [{"measure": "Disfluency types and longest disfluency moment in connected speech"},
+            {"measure": "Disfluency frequency (% syllables stuttered) in picture description"},
+            {"measure": "/s/ accuracy at sentence level"},
+            {"measure": "Speech and language screening"}]
+    kept = [s["measure"] for s in drop_recorded_repeats(sugg, recorded)]
+    assert kept == ["Disfluency frequency (% syllables stuttered) in picture description",
+                    "/s/ accuracy at sentence level", "Speech and language screening"]
+
+
+def test_stuttered_syllables_wording_is_a_measure_name_not_the_condition():
+    from scribe.completeness import names_condition
+    assert not names_condition("Count stuttered syllables in a 300-syllable sample; 7% syllables stuttered; %SS 4")
+    assert names_condition("Mother says he stutters at school")
+
+
+def test_method_numbers_in_labelled_proposals_are_not_invented_data():
+    d = {"analysis": {"findings": []}, "soap": {"plan": [
+        {"text": "Take a sample in at least two speaking situations (300 syllables each).", "origin": "ai_proposed", "decision": "pending"},
+        {"text": "Weekly sessions for 12 weeks.", "origin": "clinician", "basis": []}]}}
+    issues = [i for i in check_draft(d, "pauses and blocks", "")["issues"] if i["type"] == "unsupported_number"]
+    assert [i["ref"] for i in issues] == ["plan:1"]          # the clinician-labelled line is still checked
+
+
+def test_short_blanks_are_normalised():
+    from scribe.pipeline import blank_values
+    assert blank_values("accuracy ___/___ (__%)") == "accuracy ___/___ (___%)"

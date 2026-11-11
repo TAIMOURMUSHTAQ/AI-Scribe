@@ -19,9 +19,11 @@ const S = {
   gapState: {},      // gap id -> { status: "answered" | "dismissed" | "planned", answer }
   dismissed: [],     // checklist keys / AI gap wording marked "not relevant"; kept across re-drafts
   answersAdded: 0,   // answers added to the notes since the last draft
+  measureState: {},  // objective suggestion id -> { status: "recorded" | "planned" | "dismissed", value }
 };
 const GAP_KIND = { documentation: "Missing from the record", assessment: "Not assessed or not documented", question: "Questions for the patient or caregiver" };
 const isPending = (s) => s.origin === "ai_proposed" && s.decision !== "accepted";
+const PLACEHOLDER_RE = /not documented|no objective measures were recorded/i;
 
 /* ------------------------------------------------------------------ utils */
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -316,7 +318,7 @@ async function generate() {
 
   setMsg("");
   S.generating = true; S.draft = null; S.checks = null; S.signed = null; S.confirmSign = false; S.srcFilter = null;
-  S.gapState = {}; S.answersAdded = 0;
+  S.gapState = {}; S.answersAdded = 0; S.measureState = {};
   S.runInput = input; S.runContext = context();
   $("generateBtn").disabled = true; $("generateBtn").textContent = "Analysing…"; $("cancelBtn").hidden = false;
   resetPipeline();
@@ -622,9 +624,11 @@ function buildSoapEditor() {
         <div class="sec-tools"><button class="link" data-act="rewrite">Rewrite</button><button class="link" data-act="add">Add line</button></div>
         <div class="rewrite" hidden><input maxlength="300" placeholder="Optional instruction, e.g. shorter, more detail, parent-friendly" aria-label="Rewrite instruction for ${name}"><button class="btn sm primary" data-act="go">Rewrite</button><button class="btn sm ghost" data-act="cancel">Cancel</button></div>
         <div class="stmts"></div>
+        ${key === "objective" ? '<div class="measures" id="measures"></div>' : ""}
       </div>
     </section>`).join("");
   SECTIONS.forEach(([key]) => renderSection(key));
+  renderMeasures();
   markFlags();
 }
 function renderSection(key) {
@@ -641,7 +645,7 @@ function renderSection(key) {
     return `
     <div class="stmt-row${prop ? " proposed" : ""}${pend ? " pending" : ""}" data-sec="${key}" data-i="${i}">
       <div class="stmt-main">
-        <div class="stmt-text ${/not documented/i.test(s.text) ? "nd" : ""} ${URDU_RE.test(s.text) ? "urdu" : ""}" contenteditable="${editable}" role="textbox" aria-multiline="true" aria-label="${key} statement ${i + 1}${prop ? ", AI proposal" : ""}" spellcheck="true">${esc(s.text)}</div>
+        <div class="stmt-text ${PLACEHOLDER_RE.test(s.text) ? "nd" : ""} ${URDU_RE.test(s.text) ? "urdu" : ""}" contenteditable="${editable}" role="textbox" aria-multiline="true" aria-label="${key} statement ${i + 1}${prop ? ", AI proposal" : ""}" spellcheck="true">${esc(s.text)}</div>
         ${decision}
       </div>
       <div class="chips">${(s.basis || []).map((b) => `<button class="chip ${esc(src[b]?.source || "")}" data-goto="${esc(b)}" title="${esc(src[b]?.statement || "")}">${esc(b)}</button>`).join("")}${s.edited ? '<span class="chip edited" title="Changed by you">edited</span>' : ""}</div>
@@ -649,6 +653,73 @@ function renderSection(key) {
     </div>`;
   }).join("");
 }
+/* ------------------------------------------------------------------ Objective: what to measure */
+function renderMeasures() {
+  const box = $("measures"); if (!box) return;
+  const list = (S.draft.objective_suggestions || []);
+  if (!list.length || S.signed) { box.innerHTML = ""; return; }
+  const src = Object.fromEntries((S.draft.analysis.findings || []).map((f) => [f.id, f]));
+  const open = list.filter((m) => !S.measureState[m.id]).length;
+  box.innerHTML = `<div class="measures-head"><b>Suggested objective measures</b><span class="hint">${open} to consider. From what was reported; nothing here is in the note until you enter a result.</span></div>` +
+    list.map((m) => {
+      const st = S.measureState[m.id];
+      if (st) {
+        const what = st.status === "recorded" ? `✓ Recorded: ${txt(st.value)}` : st.status === "planned" ? "✓ Added to the Plan for next session" : "Not needed";
+        return `<div class="measure done ${st.status}" data-measure="${esc(m.id)}"><span class="m-name">${txt(m.measure)}</span><span class="m-done">${what}${st.status === "dismissed" ? ' <button class="link muted" data-mact="undo">Undo</button>' : ""}</span></div>`;
+      }
+      const chips = (m.basis || []).filter((b) => src[b]).map((b) => `<button class="chip ${esc(src[b].source)}" data-goto="${esc(b)}" title="${esc(src[b].statement || "")}">${esc(b)}</button>`).join(" ");
+      return `<div class="measure" data-measure="${esc(m.id)}">
+        <div class="m-top"><span class="pri ${esc(m.priority)}">${m.priority === "high" ? "Key measure" : m.priority === "medium" ? "Useful" : "Optional"}</span><span class="m-name">${txt(m.measure)}</span><span class="gid">${esc(m.id)}</span></div>
+        ${m.method ? `<p class="m-how"><b>How:</b> ${txt(m.method)}</p>` : ""}
+        ${m.why ? `<p class="m-why">${txt(m.why)} ${chips}</p>` : ""}
+        <div class="m-actions"><button class="btn sm primary" data-mact="record">Enter result</button><button class="btn sm ghost" data-mact="plan">Assess next session</button><button class="link muted" data-mact="dismiss">Not needed</button></div>
+        <div class="m-entry" hidden><label class="hint" for="m-in-${esc(m.id)}">Fill in the blanks (___) with what you measured</label>
+          <textarea id="m-in-${esc(m.id)}" rows="2" maxlength="400">${esc(m.record_as || "")}</textarea>
+          <div class="gap-answer-row"><button class="btn sm primary" data-mact="save">Add to Objective</button><button class="btn sm ghost" data-mact="cancel">Cancel</button></div></div>
+      </div>`;
+    }).join("");
+}
+$("soap").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-mact]"); if (!b || S.signed) return;
+  e.stopPropagation();
+  const card = b.closest("[data-measure]"); const m = (S.draft.objective_suggestions || []).find((x) => x.id === card?.dataset.measure); if (!m) return;
+  const act = b.dataset.mact;
+  if (act === "record") { const box = card.querySelector(".m-entry"); box.hidden = false; const t = box.querySelector("textarea"); t.focus(); const i = t.value.indexOf("___"); if (i >= 0) t.setSelectionRange(i, i + 3); }
+  else if (act === "cancel") card.querySelector(".m-entry").hidden = true;
+  else if (act === "save") {
+    const t = card.querySelector("textarea"); const value = t.value.replace(/\s+/g, " ").trim();
+    if (!value || /_{2,}/.test(value)) { toast("Fill in every ___ with your result, or remove the parts you did not measure.", true); t.focus(); return; }
+    // The result becomes the clinician's own words: in the notes (so a re-draft uses it) and in Objective now.
+    notes.value = notes.value.replace(/\s+$/, "") + `\nResult (${m.measure.replace(/[()]/g, "")}): ${value}`; updateCount();
+    const obj = S.draft.soap.objective.filter((x) => !PLACEHOLDER_RE.test(x.text));
+    obj.push({ text: `${m.measure}: ${value}`, basis: [], edited: true });
+    S.draft.soap.objective = obj;
+    S.measureState[m.id] = { status: "recorded", value }; S.answersAdded++;
+    renderSection("objective"); renderMeasures(); renderExtras(); refreshAnalysis(); updateNoteState(); recheck();
+    toast("Added to Objective. Press Update note to include it in the Assessment and Plan.");
+  } else if (act === "plan") {
+    const plan = S.draft.soap.plan.filter((x) => !PLACEHOLDER_RE.test(x.text));
+    plan.push({ text: `Next session: assess ${m.measure.charAt(0).toLowerCase()}${m.measure.slice(1)}${m.method ? ` (${m.method.replace(/\.$/, "")})` : ""}.`, basis: [m.id], edited: true, origin: "clinician" });
+    S.draft.soap.plan = plan;
+    S.measureState[m.id] = { status: "planned" };
+    renderSection("plan"); renderMeasures(); updateNoteState(); recheck();
+    toast("Added to the Plan.");
+  } else if (act === "dismiss") {
+    S.measureState[m.id] = { status: "dismissed" };
+    const key = `measure:${m.measure}`; if (!S.dismissed.includes(key)) S.dismissed.push(key);
+    renderMeasures();
+  } else if (act === "undo") {
+    delete S.measureState[m.id];
+    S.dismissed = S.dismissed.filter((k) => k !== `measure:${m.measure}`);
+    renderMeasures();
+  }
+}, true);
+$("soap").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && e.target.matches(".m-entry textarea")) {
+    e.preventDefault(); e.stopPropagation(); e.target.closest("[data-measure]").querySelector('[data-mact="save"]').click();
+  }
+}, true);
+
 let recheckTimer;
 $("soap").addEventListener("input", (e) => {
   const t = e.target.closest(".stmt-text"); if (!t) return;
@@ -701,6 +772,7 @@ async function rewriteSection(key, sec) {
   try {
     const r = await apiJSON("/api/scribe/regenerate", {
       input: S.runInput, context: S.runContext, analysis: S.draft.analysis, soap: S.draft.soap,
+      objective_suggestions: S.draft.objective_suggestions || [],
       dismissed_gaps: S.dismissed, section: key, instruction: box.querySelector("input").value.trim(),
     });
     S.draft.soap[key] = r.statements; S.checks = r.checks;
@@ -712,7 +784,8 @@ async function rewriteSection(key, sec) {
 async function recheck() {
   if (!S.draft) return;
   try {
-    S.checks = await apiJSON("/api/scribe/check", { input: S.runInput, context: S.runContext, analysis: S.draft.analysis, soap: S.draft.soap, dismissed_gaps: S.dismissed });
+    S.checks = await apiJSON("/api/scribe/check", { input: S.runInput, context: S.runContext, analysis: S.draft.analysis, soap: S.draft.soap,
+      objective_suggestions: S.draft.objective_suggestions || [], dismissed_gaps: S.dismissed });
     renderChecks(); markFlags();
   } catch { /* checks are advisory; keep the last result */ }
 }
@@ -850,7 +923,7 @@ $("newSession").addEventListener("click", () => {
   S.abort?.abort(); if (R.recording) stopDictation();
   notes.value = ""; ["patientAge", "diagnosis", "goals", "previousNote", "patientId"].forEach((id) => ($(id).value = ""));
   S.draft = null; S.checks = null; S.facts = null; S.signed = null; S.runInput = "";
-  S.gapState = {}; S.dismissed = []; S.answersAdded = 0;
+  S.gapState = {}; S.dismissed = []; S.answersAdded = 0; S.measureState = {};
   R.segs = []; R.nextInsert = 0; R.segIndex = 0; renderSegments();
   resetPipeline();
   $("analysis").innerHTML = '<div class="empty"><p>The analysis appears here first: what was reported, observed and measured, progress against goals, and the reasoning the note is built on.</p></div>';

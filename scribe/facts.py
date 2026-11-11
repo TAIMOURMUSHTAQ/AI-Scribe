@@ -38,7 +38,7 @@ def _fmt_pct(value: float) -> str:
 
 # "14/20" but not dates like 10/11/2026 and not phoneme slashes like /s/
 _FRACTION = re.compile(r"(?<![\d/])(\d{1,3})\s*/\s*(\d{1,3})(?![\d/])")
-_OUT_OF = re.compile(r"\b(\d{1,3})\s*(?:out\s+of|of|outta)\s*(\d{1,3})\b", re.I)
+_OUT_OF = re.compile(r"\b(\d{1,3})\s*(out\s+of|of|outta)\s*(\d{1,3})\b", re.I)
 # Roman Urdu: "20 mein se 14" = 14 out of 20
 _URDU_OUT_OF = re.compile(r"\b(\d{1,3})\s*(?:mein|main|mai|men|me)\s+(?:se|sy|say)\s+(\d{1,3})\b", re.I)
 _PERCENT = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b|fisad\b|feesad\b)", re.I)
@@ -101,9 +101,25 @@ def extract_measurements(text: str) -> list[Measurement]:
     for m in _URDU_OUT_OF.finditer(text):
         add(m, int(m.group(2)), int(m.group(1)))
     for m in _OUT_OF.finditer(text):
-        add(m, int(m.group(1)), int(m.group(2)))
+        relation = m.group(2).lower().replace("  ", " ")
+        # "2 of 3 sessions" is a count, not an accuracy score. Bare "of" needs
+        # a nearby assessment term; "out of" remains an explicit score format.
+        if relation == "of":
+            clause_start = max(text.rfind(mark, 0, m.start()) for mark in ".;,\n") + 1
+            clause_end_candidates = [text.find(mark, m.end()) for mark in ".;,\n"]
+            clause_end = min((pos for pos in clause_end_candidates if pos >= 0), default=len(text))
+            nearby = text[clause_start:clause_end]
+            if not re.search(r"\b(correct|accuracy|accurate|score|scored|trial|trials|"
+                             r"words?|items?|questions?|targets?|responses?|sahi)\b", nearby, re.I):
+                continue
+        add(m, int(m.group(1)), int(m.group(3)))
     for m in _FRACTION.finditer(text):
         add(m, int(m.group(1)), int(m.group(2)))
+    for m in _WORD_OUT_OF.finditer(text):
+        correct = _parse_number_words(m.group(1), urdu=True)
+        total = _parse_number_words(m.group(3), urdu=True)
+        if correct is not None and total is not None:
+            add(m, correct, total)
     found.sort(key=lambda x: text.find(x.raw))
     return found
 
@@ -143,7 +159,8 @@ RED_FLAGS: list[tuple[str, str, str, re.Pattern]] = [
     ("swallowing_safety", "high", "Possible swallowing safety concern: consider screening per clinic protocol.",
      re.compile(r"\b(chok(?:e|ed|es|ing)|aspirat\w*|wet\s+voice|voice\s+(?:sounded|was|became|is)\s+wet|gurgl\w*|food\s+(?:got\s+)?stuck|"
                 r"cough(?:s|ed|ing)?\s+(?:during|while|when|after|with)\s+(?:meals?|eating|drinking|liquids?|"
-                r"water|food|feeds?|swallow\w*)|khana\s+\w*\s*(?:atak|phans)\w*|nigal\w*\s+mein\s+(?:mushkil|dikkat))",
+                r"water|food|feeds?|swallow\w*)|khana\s+\w*\s*(?:atak|phans)\w*|nigal\w*\s+mein\s+(?:mushkil|dikkat)|"
+                r"کھان[اے]\s+نگلنے\s+میں\s+(?:مشکل|دقت)|نگلنے\s+میں\s+(?:مشکل|دقت))",
                 re.I)),
     ("regression", "medium", "Reported loss of previously acquired skills: confirm and monitor.",
      re.compile(r"\b(regress\w*|lost\s+(?:words?|skills?|speech)|loss\s+of\s+(?:words?|skills?|speech)|"
@@ -164,7 +181,7 @@ RED_FLAGS: list[tuple[str, str, str, re.Pattern]] = [
                 r"(?:apna|apne)\s+(?:sir|mun[h]?)\s+\w*\s*(?:maar|pat)\w*|sir\s+(?:deewar|zameen)\s+\w*\s*(?:maar|pat)\w*)",
                 re.I)),
     ("pain_or_discomfort", "medium", "Pain or discomfort reported: note location and whether it limited participation.",
-     re.compile(r"\b(pain(?:ful)?|hurts?|ache|dard)\b", re.I)),
+     re.compile(r"\b(pain(?:ful)?|hurts?|ache|dard)\b|درد", re.I)),
     ("hearing_change", "medium", "Possible hearing change reported: consider audiology review.",
      re.compile(r"\b(not\s+responding\s+to\s+(?:his|her|their)?\s*name|can'?t\s+hear|cannot\s+hear|"
                 r"ear\s+infection|ear\s+pain|kaan\s+(?:mein\s+)?dard|sun(?:ta|ti)\s+nahi)", re.I)),
@@ -187,7 +204,7 @@ def detect_red_flags(text: str) -> list[dict[str, str]]:
     flags: list[dict[str, str]] = []
     for category, severity, guidance, pattern in RED_FLAGS:
         m = pattern.search(text)
-        if m:
+        if m and not _negated_at(text, m.start()):
             flags.append({
                 "category": category,
                 "severity": severity,
@@ -196,6 +213,19 @@ def detect_red_flags(text: str) -> list[dict[str, str]]:
                 "guidance": guidance,
             })
     return flags
+
+
+_NEGATION = re.compile(r"(?:\bno\b|\bnot\b|\bnever\b|\bden(?:y|ies|ied)\b|\bwithout\b|"
+                       r"\bnahi\b|\bnahin\b|نہیں|نہ)\s*$", re.I)
+
+
+def _negated_at(text: str, start: int) -> bool:
+    """Return whether a finding is directly negated in the same short clause."""
+    prefix = text[max(0, start - 45):start]
+    prefix = re.split(r"[.;,\n]", prefix)[-1]
+    # "no longer" describes regression, not negation of the following event.
+    prefix = re.sub(r"\bno\s+longer\s*$", "", prefix, flags=re.I)
+    return bool(_NEGATION.search(prefix))
 
 
 def detect_injection(text: str) -> list[str]:
@@ -212,6 +242,21 @@ _UR_WORD_NUM = {"ek": 1, "teen": 3, "chaar": 4, "char": 4, "paanch": 5, "panch":
                 "chalees": 40, "pachaas": 50, "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90, "sau": 100}
 _WORD_NUM_RE = re.compile(r"\b(" + "|".join(sorted(_TENS, key=len, reverse=True)) + r")[-\s]+(" +
                           "|".join(_UNITS[1:10]) + r")\b|\b([a-z]+)\b", re.I)
+_WORD_TOKEN = "|".join(sorted(set(_EN_WORD_NUM) | set(_UR_WORD_NUM), key=len, reverse=True))
+_WORD_VALUE = rf"(?:{_WORD_TOKEN})(?:[-\s]+(?:{_WORD_TOKEN}))?"
+_WORD_OUT_OF = re.compile(r"\b(" + _WORD_VALUE + r")\s+(out\s+of|of)\s+(" + _WORD_VALUE +
+                          r")\b", re.I)
+
+
+def _parse_number_words(value: str, urdu: bool) -> int | None:
+    words = re.split(r"[-\s]+", value.lower().strip())
+    values = _UR_WORD_NUM if urdu else {}
+    if len(words) == 1:
+        number = _EN_WORD_NUM.get(words[0], values.get(words[0]))
+        return int(number) if isinstance(number, (int, float)) and number.is_integer() else None
+    if len(words) == 2 and words[0] in _TENS and words[1] in _UNITS[1:10]:
+        return _TENS[words[0]] + _UNITS.index(words[1])
+    return None
 
 
 def _word_numbers(text: str, urdu: bool) -> set[str]:
@@ -294,11 +339,13 @@ CLINICAL_TERMS = [
 ]
 
 NOT_DOCUMENTED = "not documented"
+# Placeholder lines ("Not documented in session input.", "No objective measures were recorded ...").
+_PLACEHOLDER_LINE = re.compile(r"not documented|no objective measures were recorded", re.I)
 
 # The same condition in other words: the AI may use any of them if the clinician used one.
 TERM_SYNONYMS = {
-    "stuttering": r"stutter\w*|stammer\w*|haklah\w*|hakla\w*|disfluen\w*|dysfluen\w*",
-    "stammering": r"stutter\w*|stammer\w*|haklah\w*|hakla\w*|disfluen\w*|dysfluen\w*",
+    "stuttering": r"stutter\w*|stammer\w*|haklah\w*|hakla\w*",  # not "disfluency": that is the neutral word
+    "stammering": r"stutter\w*|stammer\w*|haklah\w*|hakla\w*",
     "dysphagia": r"dysphagia|swallowing\s+(?:disorder|difficult\w*)",
     "asd": r"\basd\b|autism",
     "autism": r"\basd\b|autism",
@@ -360,6 +407,7 @@ def check_draft(draft: dict[str, Any], session_input: str, context_text: str,
     # Plan items and gap actions may cite gap ids (AI G#, checklist C#) as well as findings.
     known_ids = finding_ids | {str(g.get("id")) for g in analysis.get("gaps") or [] if isinstance(g, dict)}
     known_ids |= {str(g.get("id")) for g in facts.get("checklist_gaps") or []}
+    known_ids |= {str(m.get("id")) for m in draft.get("objective_suggestions") or [] if isinstance(m, dict)}
 
     # 2. Numbers in the note must come from the input, the context or code-computed percentages.
     allowed = numbers_in(source, words=True, urdu=True)
@@ -369,6 +417,8 @@ def check_draft(draft: dict[str, Any], session_input: str, context_text: str,
     allowed |= {"0", "1"}
 
     lowered_source = source.lower()
+    # "% syllables stuttered" in a typed result names a measure; it does not license the label "stuttering".
+    source_terms = re.sub(r"%?\s*syllables?\s+stuttered|stuttered\s+syllables?|%\s*ss\b", " ", lowered_source)
     for section, i, item in _iter_soap(soap):
         text = str(item.get("text", ""))
         low = text.lower()
@@ -376,12 +426,14 @@ def check_draft(draft: dict[str, Any], session_input: str, context_text: str,
         if proposed and item.get("decision") != "accepted":
             issues.append({"severity": "medium", "section": "plan", "ref": f"plan:{i}", "type": "plan_pending",
                            "message": "AI-proposed plan item waiting for your decision: accept or reject it."})
-        bad = sorted({n for n in numbers_in(text, words=True) if n not in allowed}, key=float)
+        # A labelled AI proposal may carry method numbers ("two situations", "300 syllables"); they are
+        # recommendations awaiting the clinician's decision, not facts claimed about the patient.
+        bad = [] if proposed else sorted({n for n in numbers_in(text, words=True) if n not in allowed}, key=float)
         if bad:
             issues.append({"severity": "high", "section": section, "ref": f"{section}:{i}", "type": "unsupported_number",
                            "message": f"Number(s) {', '.join(bad)} do not appear in your input or verified facts."})
         for term in CLINICAL_TERMS if not proposed else ():  # proposals are labelled and need the clinician's decision
-            in_source = re.search(rf"\b(?:{TERM_SYNONYMS.get(term, re.escape(term))})\b", lowered_source)
+            in_source = re.search(rf"\b(?:{TERM_SYNONYMS.get(term, re.escape(term))})\b", source_terms)
             if re.search(rf"\b{re.escape(term)}\b", low) and not in_source:
                 if term.startswith("diagnos") and re.search(r"\bdiagnos\w*\s+(?:on\s+file|per\s+record)", low):
                     continue
@@ -392,7 +444,7 @@ def check_draft(draft: dict[str, Any], session_input: str, context_text: str,
         if unknown and findings:
             issues.append({"severity": "low", "section": section, "ref": f"{section}:{i}", "type": "unknown_basis",
                            "message": f"Cites unknown finding(s) {', '.join(unknown)}."})
-        if not basis and NOT_DOCUMENTED not in low and not item.get("edited"):
+        if not basis and not _PLACEHOLDER_LINE.search(low) and not item.get("edited"):
             issues.append({"severity": "low", "section": section, "ref": f"{section}:{i}", "type": "no_basis",
                            "message": "This statement has no linked clinical basis."})
         if section == "plan" and not proposed and basis and findings and NOT_DOCUMENTED not in low:

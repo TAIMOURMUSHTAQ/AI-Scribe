@@ -329,6 +329,23 @@ h2 { font-size: 19px; margin: 0; }
 }
 .gap-summary { display: flex; gap: 10px; justify-content: space-between; align-items: baseline; flex-wrap: wrap; font-size: 14px; padding: 8px 0; border-top: 1px solid var(--line); }
 
+/* ---------- Objective: suggested measures ---------- */
+.measures:empty { display: none; }
+.measures { margin-top: 10px; border-top: 1px dashed var(--line-strong); padding-top: 8px; }
+.measures-head { display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; }
+.measure { border: 1px solid var(--line); border-left: 4px solid var(--src-measured); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; background: var(--surface); }
+.measure.done { border-left-color: var(--line-strong); background: var(--paper); padding: 5px 10px; display: flex; flex-wrap: wrap; gap: 4px 10px; justify-content: space-between; align-items: baseline; font-size: 13.5px; }
+.measure.done.recorded, .measure.done.planned { border-left-color: var(--ok); }
+.measure.done .m-done { color: var(--muted); }
+.measure.done.recorded .m-done, .measure.done.planned .m-done { color: var(--ok); }
+.m-top { display: flex; gap: 8px; align-items: baseline; }
+.m-name { font-weight: 700; }
+.m-how, .m-why { margin: 4px 0 0; font-size: 13.5px; }
+.m-why { color: var(--muted); }
+.m-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.m-entry { margin-top: 8px; }
+.m-entry textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: 6px; padding: 7px 9px; font: inherit; font-size: 14px; resize: vertical; margin-top: 3px; }
+
 /* ---------- AI-proposed plan items ---------- */
 .stmt-main { flex: 1; min-width: 0; }
 .stmt-row.proposed { background: #f6f9fc; box-shadow: inset 3px 0 0 var(--src-observed); }

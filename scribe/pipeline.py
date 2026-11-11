@@ -13,7 +13,8 @@ import uuid
 from typing import Any, AsyncIterator
 
 from .config import settings
-from .completeness import PLAN_LIKE, checklist_for_prompt, checklist_gaps, drop_checklist_duplicates
+from .completeness import (PLAN_LIKE, checklist_for_prompt, checklist_gaps, drop_checklist_duplicates,
+                           drop_measure_duplicates, drop_recorded_repeats, names_condition, recorded_measures)
 from .facts import check_draft, extract_facts, facts_for_prompt
 from .partial_json import parse_partial
 from .prompts import (PROMPT_VERSION, REGENERATE_SYSTEM_PROMPT, SYSTEM_PROMPT, build_draft_message,
@@ -151,9 +152,86 @@ def normalize_draft(raw: dict[str, Any]) -> dict[str, Any]:
         "input_language": raw.get("input_language", "english"),
         "analysis": analysis,
         "soap": {s: (_plan_list(soap.get(s)) if s == "plan" else _statement_list(soap.get(s))) for s in SECTIONS},
+        "objective_suggestions": _suggestion_list(raw.get("objective_suggestions")),
     }
+    obj = draft["soap"]["objective"]
+    if len(obj) == 1 and not obj[0]["basis"] and _PLACEHOLDER.search(obj[0]["text"]):
+        obj[0]["text"] = OBJECTIVE_EMPTY
     _enforce_plan_rules(draft)
     return draft
+
+
+OBJECTIVE_EMPTY = "No objective measures were recorded in this session."
+
+
+def blank_values(template: str) -> str:
+    """A template must hold blanks, never results: 6% -> ___%, 2 seconds -> ___ seconds, 14/20 -> ___/___.
+
+    Sample sizes and item counts ("300 syllables", "___/20 probe words") are method details and stay.
+    """
+    t = re.sub(r"_{2,}", "___", template)                      # "__%" -> "___%": one blank style
+    t = re.sub(r"\d+(?:\.\d+)?\s*%", "___%", t)
+    t = re.sub(r"\d+(?:\.\d+)?\s*(seconds?|secs?|ms)\b", r"___ \1", t)
+    t = re.sub(r"\b\d+\s*/\s*\d+\b", "___/___", t)
+    return t.strip() or "___"
+
+
+# Not an objective measure: a question for the family, or a decision that is the clinician's alone.
+_NOT_A_MEASURE = re.compile(r"^\s*(?:ask|interview|collect\s+(?:the\s+)?(?:caregiver|parent|family)\w*\s+report|"
+                            r"take\s+a\s+(?:structured\s+)?(?:case\s+)?history|review\s+(?:whether|records|history)|"
+                            r"document\s+known)", re.I)
+_DECISION_WORDS = re.compile(r"\b(refer\w*|diagnos\w*|medication|prescri\w*|discharg\w*)\b", re.I)
+
+
+def _suggestion_list(value: Any) -> list[dict[str, Any]]:
+    """Objective measures the clinician could take, with a fill-in template (blanks only)."""
+    out = []
+    for g in value if isinstance(value, list) else []:
+        if not isinstance(g, dict) or not str(g.get("measure", "")).strip():
+            continue
+        text = f'{g.get("measure", "")} {g.get("method", "")}'
+        if _NOT_A_MEASURE.search(str(g.get("method") or "")) or _DECISION_WORDS.search(text):
+            continue
+        out.append({
+            "id": f"M{len(out) + 1}",
+            "priority": g.get("priority") if g.get("priority") in ("high", "medium", "low") else "medium",
+            "measure": str(g["measure"]).strip(), "method": str(g.get("method") or "").strip(),
+            "why": str(g.get("why") or "").strip(), "record_as": blank_values(str(g.get("record_as") or "")),
+            "basis": [str(b) for b in g.get("basis") or [] if str(b).strip()],
+        })
+    return out[:6]
+
+
+_CONDITION_WORD = re.compile(r"\b(stutter|stammer)(ing|ed|s)?\b(?!\s*syllables)", re.I)
+
+
+def neutral_condition_names(draft: dict[str, Any], session_input: str, context_text: str) -> None:
+    """If the clinician never named the condition, AI-written suggestions must not name it either.
+
+    Covers measure suggestions (a result entered from one copies the measure name into the clinician's
+    notes) and AI plan proposals (accepted ones go into the note). "% syllables stuttered" is the
+    measure's standard name and is kept.
+    """
+    if names_condition(f"{session_input}\n{context_text}"):
+        return
+
+    def fix(t: str) -> str:
+        t = t.replace("syllables stuttered", "\0SS\0")
+        t = _CONDITION_WORD.sub(lambda m: "Disfluency" if m.group(0)[0].isupper() else "disfluency", t)
+        return t.replace("\0SS\0", "syllables stuttered")
+
+    for s in draft.get("objective_suggestions") or []:
+        for k in ("measure", "method", "why", "record_as"):
+            s[k] = fix(s.get(k, ""))
+    for p in draft["soap"]["plan"]:
+        if p.get("origin") == "ai_proposed":
+            p["text"], p["rationale"] = fix(p["text"]), fix(p.get("rationale", ""))
+
+
+def drop_dismissed_measures(suggestions: list[dict[str, Any]], dismissed: list[str]) -> list[dict[str, Any]]:
+    """The clinician marked a measure 'Not needed': keep it out of later drafts."""
+    gone = {d.split(":", 1)[1].strip().lower() for d in dismissed or [] if d.lower().startswith("measure:")}
+    return [s for s in suggestions if s["measure"].strip().lower() not in gone]
 
 
 def _remap_basis(draft: dict[str, Any], dropped: dict[str, str], kept_gap_ids: set[str]) -> None:
@@ -171,6 +249,8 @@ def _remap_basis(draft: dict[str, Any], dropped: dict[str, str], kept_gap_ids: s
     for items in draft["soap"].values():
         for item in items:
             item["basis"] = fix(item.get("basis") or [])
+    for item in draft.get("objective_suggestions") or []:
+        item["basis"] = [b for b in fix(item.get("basis") or []) if b != item["id"]]
     for key in ("goal_progress", "clinical_reasoning"):
         for item in draft["analysis"].get(key) or []:
             if isinstance(item, dict):
@@ -215,7 +295,8 @@ async def run_draft(req: DraftRequest, provider: Provider) -> AsyncIterator[dict
     yield _stage("analysis", "active")
 
     user_msg = build_draft_message(req.input, ctx, facts_for_prompt(facts),
-                                   checklist_for_prompt(facts["checklist_gaps"]), req.dismissed_gaps)
+                                   checklist_for_prompt(facts["checklist_gaps"]), req.dismissed_gaps,
+                                   recorded_measures(req.input))
     buf: list[str] = []
     last_emit = 0.0
     soap_started = False
@@ -285,9 +366,15 @@ async def run_draft(req: DraftRequest, provider: Provider) -> AsyncIterator[dict
             return
 
     draft = normalize_draft(raw)
+    draft["objective_suggestions"] = drop_recorded_repeats(
+        drop_dismissed_measures(draft["objective_suggestions"], req.dismissed_gaps), recorded_measures(req.input))
+    neutral_condition_names(draft, req.input, context_text)
     draft["analysis"]["gaps"], dropped = drop_checklist_duplicates(draft["analysis"]["gaps"], facts["checklist_gaps"],
                                                                    req.dismissed_gaps)
-    _remap_basis(draft, dropped, {str(g.get("id")) for g in draft["analysis"]["gaps"]})
+    draft["analysis"]["gaps"], dropped_m = drop_measure_duplicates(draft["analysis"]["gaps"], draft["objective_suggestions"])
+    dropped.update(dropped_m)
+    _remap_basis(draft, dropped, {str(g.get("id")) for g in draft["analysis"]["gaps"]} |
+                 {m["id"] for m in draft["objective_suggestions"]})
     if not soap_started:
         timings["analysis_ms"] = round((time.perf_counter() - t0) * 1000)
         yield _stage("analysis", "done", ms=timings["analysis_ms"])
